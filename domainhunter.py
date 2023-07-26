@@ -76,8 +76,14 @@ def append_new_domains(ws, registered_domains, new_domains, fil_name, rows, rece
             except:
                 ws['H' + str(rows)] = ""
             else:
-                ws['H' + str(rows)] = dom["Name"]
-                #print(dom["Name"])
+                if dom["Name"] == list:
+                    for name in dom["Name"]:
+                        if name == 'REDACTED FOR PRIVACY':
+                            pass
+                        else:
+                            ws['H' + str(rows)] = name
+                else:
+                    ws['H' + str(rows)] = dom["Name"]
             try:
                 dom["Org"]
             except:
@@ -224,8 +230,14 @@ def create_fill_initial_excel_for_domain(file_name, registered_domains):
         except:
             ws['H' + str(count)] = ""
         else:
-            ws['H' + str(count)] = dom["Name"]
-            #print(dom["Name"])
+            if dom["Name"] == list:
+                for name in dom["Name"]:
+                    if name == 'REDACTED FOR PRIVACY':
+                        pass
+                    else:
+                        ws['H' + str(count)] = name
+            else:
+                ws['H' + str(count)] = dom["Name"]
         try:
             dom["Org"]
         except:
