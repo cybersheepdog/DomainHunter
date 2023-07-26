@@ -1,0 +1,6 @@
+dnstwist
+python-whois
+openpyxl
+Pillow==9.5.0
+selenium
+dnspython
