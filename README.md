@@ -23,3 +23,11 @@ The Excel document contains the following columns for each registered domain:
 - Mail Server
 - Registered Email 1
 - Registered Email 2 (if it exists)
+
+## Usage
+- ### config.ini
+  - Use this to configure email for sending alert emails.
+- ### monitored_domains.txt
+  - Place one domain per line in this file to monitor them
+- It is recommended to set up a cron job to run the domain hunter script at regular intervals (1 day, 1 week, 1 month, et..) that best fit your use case.
+
