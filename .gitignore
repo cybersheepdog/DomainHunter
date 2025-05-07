@@ -2,4 +2,7 @@ bin/
 lib/
 CACHEDIR.TAG
 pyvenv.cfg
+*.xlsx
+config.ini
+monitored_domains.txt
 
