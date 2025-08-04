@@ -14,6 +14,7 @@ from configparser import ConfigParser
 domain_list = open("monitored_domains.txt", "r")
 domain_list = domain_list.read()
 domain_list = domain_list.split("\n")
+domain_list = [domain for domain in domain_list if domain]
 
 # Declare abused TLD domains for permutations
 abused_dict = "abused_tlds.dict"
@@ -209,7 +210,12 @@ def create_fill_initial_excel_for_domain(file_name, registered_domains):
         ws['C' + str(count)] = dom["fuzzer"]
         #print(dom["fuzzer"])
         if type(dom["Created Date"]) == list:
-            if dom["Created Date"][0].date() == dom["Created Date"][1].date():
+            # Added the below initial if and elif statement since error was occuring on some created_date[1]
+            if dom["Created Date"][1] == None:
+                pass
+            elif type(dom["Created Date"][1]) == str:
+                pass
+            elif dom["Created Date"][0].date() == dom["Created Date"][1].date():
                 ws['D' + str(count)] = str(dom["Created Date"][0].date())
                 #print(dom["Created Date"][0].date())
             else:
