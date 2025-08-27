@@ -219,7 +219,12 @@ def create_fill_initial_excel_for_domain(file_name, registered_domains):
         ws['C' + str(count)] = dom["fuzzer"]
         #print(dom["fuzzer"])
         if type(dom["Created Date"]) == list:
-            if dom["Created Date"][0].date() == dom["Created Date"][1].date():
+            # Added the below initial if and elif statement since error was occuring on some created_date[1]
+            if dom["Created Date"][1] == None:
+                pass
+            elif type(dom["Created Date"][1]) == str:
+                pass
+            elif dom["Created Date"][0].date() == dom["Created Date"][1].date():
                 ws['D' + str(count)] = str(dom["Created Date"][0].date())
                 #print(dom["Created Date"][0].date())
             else:
