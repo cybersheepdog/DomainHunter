@@ -1,3 +1,4 @@
+import logging
 import dnstwist
 import whois
 from openpyxl import Workbook, load_workbook
@@ -10,10 +11,19 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from configparser import ConfigParser
 
+# Configure logging
+logging.basicConfig(
+        filename="domainhunter.log",
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+
 # Reads in domains to be monitored from a text file and puts them in a list.  Domains are 1 per line.
 domain_list = open("monitored_domains.txt", "r")
 domain_list = domain_list.read()
 domain_list = domain_list.split("\n")
+domain_list = [domain for domain in domain_list if domain]
 
 # Declare abused TLD domains for permutations
 abused_dict = "abused_tlds.dict"
@@ -310,7 +320,10 @@ def get_new_domains(ws, registered_domains, existing_domains, new_domains, rows)
     return rows
     
 def get_registered_permutations(monitored_domain, registered_domains):
+    logging.info('Start of looking for permutations for (%s)' % (monitored_domain))
     registered_domains = dnstwist.run(domain=monitored_domain, registered=True, phash=True, format='null')
+    logging.info('End  of looking for permutations for (%s)' % (monitored_domain)) 
+    logging.info('Start of whois for registered domains for (%s)' % (monitored_domain))
     
     for domain in registered_domains:
         try:
@@ -325,6 +338,8 @@ def get_registered_permutations(monitored_domain, registered_domains):
             domain["Updated Date"] = w.updated_date
             domain["Expiration Date"] = w.expiration_date
             domain["Status"] = w.status
+
+    logging. info('End of whois for registered domains for (%s)' % (monitored_domain))
         
     return registered_domains
             
@@ -369,6 +384,8 @@ def send_email_with_attachment(subject, body, sender_email,receiver_email, file_
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
         server.login(sender_email, password)
         server.sendmail(sender_email, receiver_email, text)
+
+    logging.info('Initial registered domain email sent.')
         
 def send_new_domain_alert_email(subject, text, html, sender_email, receiver_email, file_name, password):
     to = ",".join(receiver_email)
@@ -415,6 +432,10 @@ def send_new_domain_alert_email(subject, text, html, sender_email, receiver_emai
         server.login(sender_email, password)
         server.sendmail(sender_email, receiver_email, message.as_string())
 
+    logging.info('New domain email sent.')
+
+logging.info('Start of program')
+
 
 for monitored_domain in domain_list:
     client = monitored_domain.split(".")
@@ -444,3 +465,5 @@ for monitored_domain in domain_list:
         append_new_domains(ws, registered_domains, new_domains, file_name, rows, receiver_email)
         wb.save(file_name)
         wb.close()
+
+logging.info('End of program')
