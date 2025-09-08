@@ -1,4 +1,6 @@
 import logging
+import random
+import time
 import dnstwist
 import whois
 from openpyxl import Workbook, load_workbook
@@ -341,6 +343,8 @@ def get_registered_permutations(monitored_domain, registered_domains):
     logging.info('Start of whois for registered domains for (%s)' % (monitored_domain))
     
     for domain in registered_domains:
+        random_number = random.randint(10,20)
+        time.sleep(random_number)
         try:
             w = whois.whois(domain["domain"])
         except Exception:
