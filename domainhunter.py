@@ -305,7 +305,16 @@ def create_fill_initial_excel_for_domain(file_name, registered_domains):
     # Save and close Excel Document
     wb.save(file_name)
     wb.close()
-    
+
+def get_abused_tlds(abused_dict):
+    # Reads in domains to be monitored from a text file and puts them in a list.  Domains are 1 per line.
+    abused_list = open(abused_dict, "r")
+    abused_list = abused_list.read()
+    abused_list = abused_list.split("\n")
+    abused_list = [tld for tld in abused_list if tld]
+
+    return abused_list
+
 def get_new_domains(ws, registered_domains, existing_domains, new_domains, rows):
     for col in ws['B']:
         rows = rows + 1
@@ -326,7 +335,8 @@ def get_new_domains(ws, registered_domains, existing_domains, new_domains, rows)
     
 def get_registered_permutations(monitored_domain, registered_domains):
     logging.info('Start of looking for permutations for (%s)' % (monitored_domain))
-    registered_domains = dnstwist.run(domain=monitored_domain, registered=True, phash=True, format='null')
+    #registered_domains = dnstwist.run(domain=monitored_domain, registered=True, phash=True, format='null')
+    registered_domains = dnstwist.run(domain=monitored_domain, registered=True, phash=True, format='null', tld="abused_tlds.dict")
     logging.info('End  of looking for permutations for (%s)' % (monitored_domain)) 
     logging.info('Start of whois for registered domains for (%s)' % (monitored_domain))
     
