@@ -11,7 +11,7 @@ Sub-sequent emails are sent when a newly registered domain permutation is detect
 
 The Excel document contains the following columns for each registered domain:
 - Permutation Type:
-  - Bitsquatting, omissin, substituion, et..
+  - Bitsquatting, omissin, substituion, tld swap, et..
 - Date Created
 - Last Updated
 - Registrant Name
