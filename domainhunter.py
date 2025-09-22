@@ -291,7 +291,6 @@ def create_fill_initial_excel_for_domain(file_name, registered_domains):
     # Save and close Excel Document
     wb.save(file_name)
     wb.close()
-<<<<<<< HEAD
 
 def get_abused_tlds(abused_dict):
     # Reads in domains to be monitored from a text file and puts them in a list.  Domains are 1 per line.
@@ -302,13 +301,9 @@ def get_abused_tlds(abused_dict):
 
     return abused_list
 
-def get_new_domains(ws, registered_domains, existing_domains, new_domains, rows):
-=======
-    
 def get_new_domains(file_name, registered_domains, existing_domains, new_domains, rows):
     wb = load_workbook(file_name)
     ws = wb.active
->>>>>>> logging
     for col in ws['B']:
         rows = rows + 1
         if col.value == "Domain":
@@ -324,7 +319,6 @@ def get_new_domains(file_name, registered_domains, existing_domains, new_domains
             
     wb.save(file_name)
     wb.close()
-    print("rows: " + str(rows))
     return rows
     
 def get_registered_permutations(monitored_domain, registered_domains):
