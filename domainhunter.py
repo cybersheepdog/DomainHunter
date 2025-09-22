@@ -33,46 +33,44 @@ config_object = ConfigParser()
 try:
     config_object.read("config.ini")
 except:
-    print("Error with config.ini")
+    logging.info('Error with config.ini')
 else:
     email = config_object["EMAIL"]
     if email['password']:
         password = email['password']
     else:
-        print("Email password not configured in config.ini.  Please do so before proceeding.")
+        logging.info('Email password not configured in config.ini.  Please do so before proceeding.')
         exit()
     if email['receiver_email']:
         receiver_email = email['receiver_email']
         receiver_email = receiver_email.split(",")
     else:
-        print("Receiver Email(s) not configured in config.ini.  Please do so before preoceeding.")
+        logging.info('Receiver Email(s) not configured in config.ini.  Please do so before preoceeding.')
         exit()
     if email['sender_email']:
         sender_email = email['sender_email']
     else:
-        print("Sender Email not configured in config.ini.  Please do so before preoceeding.")
+        logging.info('Sender Email not configured in config.ini.  Please do so before preoceeding.')
         exit()
     
 # Declare dynamic variabls for sending emails
 body = ""
 subject = ""
 
-def append_new_domains(ws, registered_domains, new_domains, fil_name, rows, receiver_email):
+def append_new_domains(registered_domains, new_domains, file_name, rows, receiver_email, today):
+    wb = load_workbook(file_name)
+    ws = wb.active
     for dom in registered_domains:
         if dom["domain"] in new_domains:
-            print(dom["domain"] + " is new.")
             ws['A' + str(rows)] = today
             ws['B' + str(rows)] = dom["domain"]
             ws['C' + str(rows)] = dom["fuzzer"]
             if type(dom["Created Date"]) == list:
                 if dom["Created Date"][0].date() == dom["Created Date"][1].date():
                     ws['D' + str(rows)] = str(dom["Created Date"][0].date())
-                    #print(dom["Created Date"][0].date())
                 else:
                     ws['D' + str(rows)] = str(dom["Created Date"][0].date())
-                    #print(dom["Created Date"][0].date())
                     ws['E' + str(rows)] = str(dom["Created Date"][1].date())
-                    #print(dom["Created Date"][1].date())
             else:
                 try:
                     dom["Created Date"].date()
@@ -80,7 +78,6 @@ def append_new_domains(ws, registered_domains, new_domains, fil_name, rows, rece
                     pass
                 else:
                     ws['D' + str(rows)] = str(dom["Created Date"].date())
-                    #print(dom["Created Date"].date())
             try:
                 dom["Name"]
             except:
@@ -100,35 +97,30 @@ def append_new_domains(ws, registered_domains, new_domains, fil_name, rows, rece
                 ws['I' + str(rows)] = ""
             else:
                 ws['I' + str(rows)] = dom["Org"]
-                #print(dom["Org"])                
             try:
                 dom["phash"]
             except:
                 ws['J' + str(rows)] = ""
             else:
                 ws['J' + str(rows)] = dom["phash"]
-                #print(dom["phash"])
             try:
                 dom["dns_ns"]
             except:
                 ws['K' + str(rows)] = ""
             else:
                 ws['K' + str(rows)] = dom["dns_ns"][0]
-                #(dom["dns_ns"][0]) 
             try:
                 dom["dns_a"]
             except:
                 ws['L' + str(rows)] = ""
             else:
                 ws['L' + str(rows)] = dom["dns_a"][0]
-                #print(dom["dns_a"][0])
             try:
                 dom["dns_mx"]
             except:
                 ws['M' + str(rows)] = ""
             else:
                 ws['M' + str(rows)] = dom["dns_mx"][0]
-                #print(dom["dns_mx"][0])
             try:
                 dom["Emails"]
             except:
@@ -143,6 +135,10 @@ def append_new_domains(ws, registered_domains, new_domains, fil_name, rows, rece
                     pass
             rows = rows + 1                         
             
+            wb.save(file_name)
+            wb.close()
+
+
             # Fill in variables for new alert email
             client_name = client[0].title()
             subject = "New domain alert for %s." % client_name
@@ -167,7 +163,7 @@ def append_new_domains(ws, registered_domains, new_domains, fil_name, rows, rece
             """ % (client_name, dom["domain"], dom["Created Date"], dom["fuzzer"])
             
             send_new_domain_alert_email(subject, text, html, sender_email,receiver_email, file_name, password)
-            print("Email sent for " + client_name + " " + dom["domain"])
+            logging.info('Email sent for {} {}'.format(client_name,dom["domain"]))
         else:
             pass
 
@@ -213,20 +209,14 @@ def create_fill_initial_excel_for_domain(file_name, registered_domains):
     count = 2
     for dom in registered_domains:
         ws['A' + str(count)] = today
-        #print(today)
         ws['B' + str(count)] = dom["domain"]
-        #print(dom["domain"])
         ws['C' + str(count)] = dom["fuzzer"]
-        #print(dom["fuzzer"])
         if type(dom["Created Date"]) == list:
             if dom["Created Date"][0].date() == dom["Created Date"][1].date():
                 ws['D' + str(count)] = str(dom["Created Date"][0].date())
-                #print(dom["Created Date"][0].date())
             else:
                 ws['D' + str(count)] = str(dom["Created Date"][0].date())
-                #print(dom["Created Date"][0].date())
                 ws['E' + str(count)] = str(dom["Created Date"][1].date())
-                #print(dom["Created Date"][1].date())
         else:
             try:
                 dom["Created Date"].date()
@@ -234,7 +224,6 @@ def create_fill_initial_excel_for_domain(file_name, registered_domains):
                 pass
             else:
                 ws['D' + str(count)] = str(dom["Created Date"].date())
-                #print(dom["Created Date"].date())
         try:
             dom["Name"]
         except:
@@ -254,35 +243,30 @@ def create_fill_initial_excel_for_domain(file_name, registered_domains):
             ws['I' + str(count)] = ""
         else:
             ws['I' + str(count)] = dom["Org"]
-            #print(dom["Org"])                
         try:
             dom["phash"]
         except:
             ws['J' + str(count)] = ""
         else:
             ws['J' + str(count)] = dom["phash"]
-            #print(dom["phash"])
         try:
             dom["dns_ns"]
         except:
             ws['K' + str(count)] = ""
         else:
             ws['K' + str(count)] = dom["dns_ns"][0]
-            #(dom["dns_ns"][0]) 
         try:
             dom["dns_a"]
         except:
             ws['L' + str(count)] = ""
         else:
             ws['L' + str(count)] = dom["dns_a"][0]
-            #print(dom["dns_a"][0])
         try:
             dom["dns_mx"]
         except:
             ws['M' + str(count)] = ""
         else:
             ws['M' + str(count)] = dom["dns_mx"][0]
-            #print(dom["dns_mx"][0])
         try:
             dom["Emails"]
         except:
@@ -301,22 +285,25 @@ def create_fill_initial_excel_for_domain(file_name, registered_domains):
     wb.save(file_name)
     wb.close()
     
-def get_new_domains(ws, registered_domains, existing_domains, new_domains, rows):
+def get_new_domains(file_name, registered_domains, existing_domains, new_domains, rows):
+    wb = load_workbook(file_name)
+    ws = wb.active
     for col in ws['B']:
         rows = rows + 1
         if col.value == "Domain":
             pass
         else:
-            #print(col.value + " Exists")
             existing_domains.append(col.value)
 
     for line in registered_domains:
         if line["domain"] in existing_domains:
             pass
         else:
-            print(line["domain"] + " is new")
             new_domains.append(line["domain"])
             
+    wb.save(file_name)
+    wb.close()
+    print("rows: " + str(rows))
     return rows
     
 def get_registered_permutations(monitored_domain, registered_domains):
@@ -345,7 +332,6 @@ def get_registered_permutations(monitored_domain, registered_domains):
             
 def send_email_with_attachment(subject, body, sender_email,receiver_email, file_name, password):
     to = ",".join(receiver_email)
-    # password = input("Type your password and press enter:")
 
     # Create a multipart message and set headers
     message = MIMEMultipart()
@@ -456,14 +442,10 @@ for monitored_domain in domain_list:
         body = "Hello,\nHere is the Excel document containing all similarly registered domains for %s for %s." % (monitored_domain, client_name)
         send_email_with_attachment(subject, body, sender_email, receiver_email, file_name, password)
     else:
-        wb = load_workbook(file_name)
-        ws = wb.active
         existing_domains = []
         new_domains = []
         rows = 1
-        rows = get_new_domains(ws, registered_domains, existing_domains, new_domains, rows)
-        append_new_domains(ws, registered_domains, new_domains, file_name, rows, receiver_email)
-        wb.save(file_name)
-        wb.close()
+        rows = get_new_domains(file_name, registered_domains, existing_domains, new_domains, rows)
+        append_new_domains(registered_domains, new_domains, file_name, rows, receiver_email, today)
 
 logging.info('End of program')
