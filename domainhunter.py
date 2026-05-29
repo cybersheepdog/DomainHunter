@@ -1,469 +1,513 @@
+# Python Standard Library Imports
+import asyncio
 import logging
-import random
-import time
-import dnstwist
+import os
+import socket
+import sys
+
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+
+# 3rd Party Imports
+import aiohttp
+import configparser
+import dns.asyncresolver
+import imagehash
+import pandas as pd
+import smtplib
 import whois
-from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Font
-from datetime import date
-import email, smtplib, ssl
-from email import encoders
-from email.mime.base import MIMEBase
+
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from configparser import ConfigParser
+from email.mime.base import MIMEBase
+from email import encoders
+from PIL import Image
 
-# Configure logging
-logging.basicConfig(
-        filename="domainhunter.log",
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s'
-)
+# Runtime Limits to prevent socket exhaustion given the expanded permutation pool
+MAX_CONCURRENT_DNS = 40     # Throttled slightly to handle the larger volume safely
+MAX_CONCURRENT_HTTP = 8     # Preserved socket limits for HTTP sessions
+THREAD_POOL_SIZE = 5        # Throttled worker pool for blocking operations
+
+# Configure Logging
+logger = logging.getLogger("DomainHunter")
+logger.setLevel(logging.INFO)
+log_formatter = logging.Formatter('%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+
+file_handler = logging.FileHandler("domainhunter.log", mode="a", encoding="utf-8")
+file_handler.setFormatter(log_formatter)
+logger.addHandler(file_handler)
+
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setFormatter(logging.Formatter('%(message)s'))
+logger.addHandler(console_handler)
 
 
-# Reads in domains to be monitored from a text file and puts them in a list.  Domains are 1 per line.
-domain_list = open("monitored_domains.txt", "r")
-domain_list = domain_list.read()
-domain_list = domain_list.split("\n")
-domain_list = [domain for domain in domain_list if domain]
+class AdvancedDomainHunter:
+    def __init__(self, config_path="config.ini", target_domains_path="monitored_domains.txt", tlds_dict_path="abused_tlds.dict"):
+        self.config_path = config_path
+        self.target_domains_path = target_domains_path
+        self.tlds_dict_path = tlds_dict_path
+        
+        self.config = configparser.ConfigParser()
+        self.load_config()
+        
+        self.monitored_domains = self._load_file_lines(self.target_domains_path)
+        self.abused_tlds = self._load_file_lines(self.tlds_dict_path)
+        self.executor = ThreadPoolExecutor(max_workers=THREAD_POOL_SIZE)
 
-# Declare abused TLD domains for permutations
-abused_dict = "abused_tlds.dict"
+        # QWERTY Keyboard proximity matrix for structural insertion mutations
+        self.qwerty_matrix = {
+            'a': ['q', 'w', 's', 'z'], 'b': ['v', 'g', 'h', 'n'], 'c': ['x', 'd', 'f', 'v'],
+            'd': ['s', 'e', 'r', 'f', 'c', 'x'], 'e': ['w', 's', 'd', 'r'], 'f': ['d', 'r', 't', 'g', 'v', 'c'],
+            'g': ['f', 't', 'y', 'h', 'b', 'v'], 'h': ['g', 'y', 'u', 'j', 'n', 'b'], 'i': ['u', 'j', 'k', 'o'],
+            'j': ['h', 'u', 'i', 'k', 'm', 'n'], 'k': ['j', 'i', 'o', 'l', 'm'], 'l': ['k', 'o', 'p'],
+            'm': ['n', 'j', 'k', 'l'], 'n': ['b', 'h', 'j', 'm'], 'o': ['i', 'k', 'l', 'p'],
+            'p': ['o', 'l'], 'q': ['1', '2', 'w', 'a'], 'r': ['e', 'd', 'f', 't'], 's': ['a', 'w', 'e', 'd', 'x', 'z'],
+            't': ['r', 'f', 'g', 'y'], 'u': ['y', 'h', 'j', 'i'], 'v': ['c', 'f', 'g', 'b'],
+            'w': ['q', 'a', 's', 'e'], 'x': ['z', 's', 'd', 'c'], 'y': ['t', 'g', 'h', 'u'], 'z': ['a', 's', 'x'],
+            '0': ['9', 'p'], '1': ['2', 'q'], '2': ['1', '3', 'q', 'w'], '3': ['2', '4', 'w', 'e'],
+            '4': ['3', '5', 'e', 'r'], '5': ['4', '6', 'r', 't'], '6': ['5', '7', 't', 'y'],
+            '7': ['6', '8', 'y', 'u'], '8': ['7', '9', 'u', 'i'], '9': ['8', '0', 'i', 'o']
+        }
 
-# Get email config from config file
-config_object = ConfigParser()
-try:
-    config_object.read("config.ini")
-except:
-    logging.info('Error with config.ini')
-else:
-    email = config_object["EMAIL"]
-    if email['password']:
-        password = email['password']
-    else:
-        logging.info('Email password not configured in config.ini.  Please do so before proceeding.')
-        exit()
-    if email['receiver_email']:
-        receiver_email = email['receiver_email']
-        receiver_email = receiver_email.split(",")
-    else:
-        logging.info('Receiver Email(s) not configured in config.ini.  Please do so before preoceeding.')
-        exit()
-    if email['sender_email']:
-        sender_email = email['sender_email']
-    else:
-        logging.info('Sender Email not configured in config.ini.  Please do so before preoceeding.')
-        exit()
-    
-# Declare dynamic variabls for sending emails
-body = ""
-subject = ""
+        # Unicode Homoglyph Look-alike Map (Latin to Cyrillic/Greek/Extended transitions)
+        self.homoglyph_matrix = {
+            'a': ['а', 'à', 'á', 'â', 'ã', 'ä', 'å', 'ɑ', 'α'],
+            'c': ['с', 'ć', 'ĉ', 'ċ', 'č', '¢'],
+            'e': ['е', 'è', 'é', 'ê', 'ë', 'ė', 'ě', 'ε', 'е'],
+            'i': ['і', 'ì', 'í', 'î', 'ï', 'ı', 'ι'],
+            'j': ['ј', 'ĵ', 'ǰ'],
+            'o': ['о', 'ò', 'ó', 'â', 'õ', 'ö', 'ø', 'ο', 'о'],
+            'p': ['р', 'ρ'],
+            's': ['ѕ', 'ś', 'ŝ', 'ş', 'š'],
+            'w': ['ԝ', 'ŵ'],
+            'x': ['х', '×'],
+            'y': ['у', 'ý', 'ÿ', 'γ']
+        }
 
-def append_new_domains(registered_domains, new_domains, file_name, rows, receiver_email, today):
-    wb = load_workbook(file_name)
-    ws = wb.active
-    for dom in registered_domains:
-        if dom["domain"] in new_domains:
-            ws['A' + str(rows)] = today
-            ws['B' + str(rows)] = dom["domain"]
-            ws['C' + str(rows)] = dom["fuzzer"]
-            if type(dom["Created Date"]) == list:
-                if dom["Created Date"][0].date() == dom["Created Date"][1].date():
-                    ws['D' + str(rows)] = str(dom["Created Date"][0].date())
-                else:
-                    ws['D' + str(rows)] = str(dom["Created Date"][0].date())
-                    ws['E' + str(rows)] = str(dom["Created Date"][1].date())
-            else:
-                try:
-                    dom["Created Date"].date()
-                except:
-                    pass
-                else:
-                    ws['D' + str(rows)] = str(dom["Created Date"].date())
+        # High-probability threat hunting dictionary modifiers
+        self.hunting_keywords = [
+            'login', 'secure', 'vpn', 'verify', 'account', 'mail', 'support', 
+            'update', 'portal', 'signin', 'auth', 'service', 'admin'
+        ]
+
+    def load_config(self):
+        if os.path.exists(self.config_path):
+            self.config.read(self.config_path)
+        
+        if 'EMAIL' not in self.config:
+            self.config['EMAIL'] = {
+                'password': '',
+                'receiver_email': '',
+                'sender_email': ''
+            }
+            with open(self.config_path, 'w') as f:
+                self.config.write(f)
+
+    def _load_file_lines(self, path):
+        if not os.path.exists(path):
+            logger.info(f"[-] Warning: Reference file '{path}' not found. Creating empty file.")
+            with open(path, 'w') as f: pass
+            return []
+        with open(path, 'r') as f:
+            return [line.strip().lower().lstrip('.') for line in f if line.strip() and not line.startswith('#')]
+
+    def generate_permutations(self, domain):
+        """
+        12 permutation vectors with domain name (IDN) punycode normalization.
+        """
+        permutations = {}
+        parts = domain.split('.')
+        if len(parts) < 2:
+            return permutations
+        name, original_tld = parts[0], '.'.join(parts[1:])
+
+        def add_mutation(mut_name, p_type, tld=original_tld):
+            if not mut_name:
+                return
             try:
-                dom["Name"]
-            except:
-                ws['H' + str(rows)] = ""
-            else:
-                if type(dom["Name"]) == list:
-                    for name in dom["Name"]:
-                        if name == 'REDACTED FOR PRIVACY':
-                            pass
-                        else:
-                            ws['H' + str(rows)] = name
-                else:
-                    ws['H' + str(rows)] = dom["Name"]
-            try:
-                dom["Org"]
-            except:
-                ws['I' + str(rows)] = ""
-            else:
-                ws['I' + str(rows)] = dom["Org"]
-            try:
-                dom["phash"]
-            except:
-                ws['J' + str(rows)] = ""
-            else:
-                ws['J' + str(rows)] = dom["phash"]
-            try:
-                dom["dns_ns"]
-            except:
-                ws['K' + str(rows)] = ""
-            else:
-                ws['K' + str(rows)] = dom["dns_ns"][0]
-            try:
-                dom["dns_a"]
-            except:
-                ws['L' + str(rows)] = ""
-            else:
-                ws['L' + str(rows)] = dom["dns_a"][0]
-            try:
-                dom["dns_mx"]
-            except:
-                ws['M' + str(rows)] = ""
-            else:
-                ws['M' + str(rows)] = dom["dns_mx"][0]
-            try:
-                dom["Emails"]
-            except:
-                ws['N' + str(rows)] = ""
-            else:
-                if type(dom["Emails"]) == list:
-                    ws['N' + str(rows)] = dom["Emails"][0]
-                    ws['O' + str(rows)] = dom["Emails"][1]                
-                elif type(dom["Emails"]) == str:
-                    ws['N' + str(rows)] = dom["Emails"]
-                else:
-                    pass
-            rows = rows + 1                         
+                puny_name = mut_name.encode('idna').decode('utf-8')
+                full_dom = f"{puny_name}.{tld}"
+                if full_dom != domain:
+                    permutations[full_dom] = p_type
+            except Exception:
+                pass
+
+        # 1. Abused TLD Swapping
+        for t in self.abused_tlds:
+            add_mutation(name, "Abused TLD Swap", tld=t)
+
+        # 2. Character Omissions
+        for i in range(len(name)):
+            omit = name[:i] + name[i+1:]
+            add_mutation(omit, "Omission")
+
+        # 3. Bitsquatting
+        for i in range(len(name)):
+            c = name[i]
+            for bit in range(8):
+                mutated_char = chr(ord(c) ^ (1 << bit))
+                if mutated_char.isalnum() and mutated_char != c:
+                    add_mutation(name[:i] + mutated_char + name[i+1:], "Bitsquatting")
+
+        # 4. Character Substitutions
+        subs = {'o': ['0', 'p'], 'i': ['1', 'l', 'u'], 'e': ['3', 'w', 'r'], 'a': ['4', 's']}
+        for i, c in enumerate(name):
+            if c in subs:
+                for replacement in subs[c]:
+                    add_mutation(name[:i] + replacement + name[i+1:], "Substitution")
+
+        # 5. Advanced Homoglyphs (Unicode Look-alikes / IDN Attacks)
+        for i, c in enumerate(name):
+            if c in self.homoglyph_matrix:
+                for glyph in self.homoglyph_matrix[c]:
+                    add_mutation(name[:i] + glyph + name[i+1:], "Homoglyph")
+
+        # 6. Hyphenation Insertion
+        for i in range(1, len(name)):
+            add_mutation(name[:i] + '-' + name[i:], "Hyphenation")
+
+        # 7. Keyboard Proximity / Fat-Finger Insertions
+        for i in range(len(name)):
+            c = name[i]
+            if c in self.qwerty_matrix:
+                for near_key in self.qwerty_matrix[c]:
+                    add_mutation(name[:i] + near_key + name[i:], "Keyboard Insertion")
+                    add_mutation(name[:i+1] + near_key + name[i+1:], "Keyboard Insertion")
+
+        # 8. Transposition (Adjacent Character Anagramming)
+        for i in range(len(name) - 1):
+            transposed = name[:i] + name[i+1] + name[i] + name[i+2:]
+            add_mutation(transposed, "Transposition")
+
+        # 9. Key Repetition (Sticky Keys / Double Clicks)
+        for i in range(len(name)):
+            repeated = name[:i] + name[i] + name[i] + name[i+1:]
+            add_mutation(repeated, "Repetition")
+
+        # 10. Vowel Swapping Matrix
+        vowels = ['a', 'e', 'i', 'o', 'u']
+        for i, c in enumerate(name):
+            if c in vowels:
+                for v in vowels:
+                    if v != c:
+                        add_mutation(name[:i] + v + name[i+1:], "Vowel Swap")
+
+        # 11. Subdomain Root-Chaining Insertion
+        for i in range(1, len(name)):
+            add_mutation(name[:i] + '.' + name[i:], "Subdomain Insertion")
+
+        # 12. Corporate Dictionary Affixes (Prepending/Appending)
+        for kw in self.hunting_keywords:
+            add_mutation(f"{kw}-{name}", "Dictionary Affix")
+            add_mutation(f"{name}-{kw}", "Dictionary Affix")
+            add_mutation(f"{kw}{name}", "Dictionary Affix")
+            add_mutation(f"{name}{kw}", "Dictionary Affix")
+
+        return permutations
+
+    async def resolve_dns_records(self, domain, sem):
+        async with sem:
+            resolver = dns.asyncresolver.Resolver()
+            resolver.timeout = 2.0
+            resolver.lifetime = 2.0
+            results = {"IP": None, "Mail Server": None, "Name Server": None, "Active": False}
             
-            wb.save(file_name)
-            wb.close()
-
-
-            # Fill in variables for new alert email
-            client_name = client[0].title()
-            subject = "New domain alert for %s." % client_name
-            text = """\
-                   Hello,\n
-                   Here is the new domain alert for %s\n.
-                   New Domain: %s\n
-                   Created Date: %s\n
-                   Type: %s
-                   """ % (client_name, dom["domain"], dom["Created Date"], dom["fuzzer"])
-            html = """\
-            <html>
-              <body>
-                <p>Hello,<br>
-                   Here is the new domain alert for %s.<br>
-                   New Domain: %s<br>
-                   Created Date: %s<br>
-                  Type: %s<br>
-                </p>
-              </body>
-            </html>
-            """ % (client_name, dom["domain"], dom["Created Date"], dom["fuzzer"])
-            
-            send_new_domain_alert_email(subject, text, html, sender_email,receiver_email, file_name, password)
-            logging.info('Email sent for {} {}'.format(client_name,dom["domain"]))
-        else:
-            pass
-
-def create_fill_initial_excel_for_domain(file_name, registered_domains):
-    # Create new Excel Document
-    wb = Workbook()
-    # Get active sheet
-    ws = wb.active
-
-    # Create Column Names
-    ws['A1'] = "Added Date"
-    ws['A1'].font = Font(bold=True)
-    ws['B1'] = "Domain"
-    ws['B1'].font = Font(bold=True)
-    ws['C1'] = "Permutation"
-    ws['C1'].font = Font(bold=True)
-    ws['D1'] = "Date Created 1"
-    ws['D1'].font = Font(bold=True)
-    ws['E1'] = "Date Created 2"
-    ws['E1'].font = Font(bold=True)
-    ws['F1'] = "Last Updated 1"
-    ws['F1'].font = Font(bold=True)
-    ws['G1'] = "Last Updated 2"
-    ws['G1'].font = Font(bold=True)
-    ws['H1'] = "Registrant Name"
-    ws['H1'].font = Font(bold=True)
-    ws['I1'] = "Organization"
-    ws['I1'].font = Font(bold=True)
-    ws['J1'] = "PHash"
-    ws['J1'].font = Font(bold=True)
-    ws['K1'] = "Name Server"
-    ws['K1'].font = Font(bold=True)
-    ws['L1'] = "IP"
-    ws['L1'].font = Font(bold=True)
-    ws['M1'] = "Mail Server"
-    ws['M1'].font = Font(bold=True)
-    ws['N1'] = "Registered Email 1"
-    ws['N1'].font = Font(bold=True)
-    ws['O1'] = "Registered Email 2"
-    ws['O1'].font = Font(bold=True)
-    # Turn on auto-filter
-    ws.auto_filter.ref = ws.dimensions
-    count = 2
-    for dom in registered_domains:
-        ws['A' + str(count)] = today
-        ws['B' + str(count)] = dom["domain"]
-        ws['C' + str(count)] = dom["fuzzer"]
-        if type(dom["Created Date"]) == list:
-            # Added the below initial if and elif statement since error was occuring on some created_date[1]
-            if dom["Created Date"][1] == None:
-                pass
-            elif type(dom["Created Date"][1]) == str:
-                pass
-            elif dom["Created Date"][0].date() == dom["Created Date"][1].date():
-                ws['D' + str(count)] = str(dom["Created Date"][0].date())
-            else:
-                ws['D' + str(count)] = str(dom["Created Date"][0].date())
-                ws['E' + str(count)] = str(dom["Created Date"][1].date())
-        else:
             try:
-                dom["Created Date"].date()
-            except:
-                pass
-            else:
-                ws['D' + str(count)] = str(dom["Created Date"].date())
-        try:
-            dom["Name"]
-        except:
-            ws['H' + str(count)] = ""
-        else:
-            if type(dom["Name"]) == list:
-                for name in dom["Name"]:
-                    if name == 'REDACTED FOR PRIVACY':
-                        pass
+                a_records = await resolver.resolve(domain, 'A')
+                results["IP"] = ", ".join([str(ip) for ip in a_records])
+                results["Active"] = True
+            except Exception: pass
+
+            try:
+                mx_records = await resolver.resolve(domain, 'MX')
+                results["Mail Server"] = ", ".join([str(mx.exchange).rstrip('.') for mx in mx_records])
+                results["Active"] = True
+            except Exception: pass
+
+            try:
+                ns_records = await resolver.resolve(domain, 'NS')
+                results["Name Server"] = ", ".join([str(ns.target).rstrip('.') for ns in ns_records])
+                results["Active"] = True
+            except Exception: pass
+
+            return results
+
+    def fetch_blocking_whois(self, domain):
+        out = {"Created": None, "Updated": None, "Registrant": None, "Org": None, "Email1": None, "Email2": None}
+        retries = 2
+        delay = 1.0
+        
+        for attempt in range(retries + 1):
+            try:
+                w = whois.whois(domain)
+                
+                if isinstance(w.creation_date, list) and w.creation_date:
+                    out["Created"] = w.creation_date[0].strftime("%Y-%m-%d") if w.creation_date[0] else None
+                elif w.creation_date:
+                    out["Created"] = w.creation_date.strftime("%Y-%m-%d")
+
+                if isinstance(w.updated_date, list) and w.updated_date:
+                    out["Updated"] = w.updated_date[0].strftime("%Y-%m-%d") if w.updated_date[0] else None
+                elif w.updated_date:
+                    out["Updated"] = w.updated_date.strftime("%Y-%m-%d")
+
+                out["Registrant"] = w.name
+                out["Org"] = w.org
+
+                if w.emails:
+                    if isinstance(w.emails, list):
+                        out["Email1"] = w.emails[0]
+                        if len(w.emails) > 1: out["Email2"] = w.emails[1]
                     else:
-                        ws['H' + str(count)] = name
-            else:
-                ws['H' + str(count)] = dom["Name"]
-        try:
-            dom["Org"]
-        except:
-            ws['I' + str(count)] = ""
-        else:
-            ws['I' + str(count)] = dom["Org"]
-        try:
-            dom["phash"]
-        except:
-            ws['J' + str(count)] = ""
-        else:
-            ws['J' + str(count)] = dom["phash"]
-        try:
-            dom["dns_ns"]
-        except:
-            ws['K' + str(count)] = ""
-        else:
-            ws['K' + str(count)] = dom["dns_ns"][0]
-        try:
-            dom["dns_a"]
-        except:
-            ws['L' + str(count)] = ""
-        else:
-            ws['L' + str(count)] = dom["dns_a"][0]
-        try:
-            dom["dns_mx"]
-        except:
-            ws['M' + str(count)] = ""
-        else:
-            ws['M' + str(count)] = dom["dns_mx"][0]
-        try:
-            dom["Emails"]
-        except:
-            ws['N' + str(count)] = ""
-        else:
-            if type(dom["Emails"]) == list:
-                ws['N' + str(count)] = dom["Emails"][0]
-                ws['O' + str(count)] = dom["Emails"][1]                
-            elif type(dom["Emails"]) == str:
-                ws['N' + str(count)] = dom["Emails"]
-            else:
-                pass
-                        
-        count = count + 1
-    # Save and close Excel Document
-    wb.save(file_name)
-    wb.close()
+                        out["Email1"] = w.emails
+                break
+                
+            except (ConnectionResetError, ConnectionRefusedError, socket.timeout):
+                if attempt == retries:
+                    break
+                import time
+                time.sleep(delay)
+                delay *= 2
+            except Exception:
+                break
+        return out
 
-def get_abused_tlds(abused_dict):
-    # Reads in domains to be monitored from a text file and puts them in a list.  Domains are 1 per line.
-    abused_list = open(abused_dict, "r")
-    abused_list = abused_list.read()
-    abused_list = abused_list.split("\n")
-    abused_list = [tld for tld in abused_list if tld]
-
-    return abused_list
-
-def get_new_domains(file_name, registered_domains, existing_domains, new_domains, rows):
-    wb = load_workbook(file_name)
-    ws = wb.active
-    for col in ws['B']:
-        rows = rows + 1
-        if col.value == "Domain":
-            pass
-        else:
-            existing_domains.append(col.value)
-
-    for line in registered_domains:
-        if line["domain"] in existing_domains:
-            pass
-        else:
-            new_domains.append(line["domain"])
+    async def fetch_phash(self, domain, session, sem):
+        """
+        Defaults to HTTPS with fallback to HTTP upon handshake or cert validation failures.
+        """
+        async with sem:
+            url = f"https://{domain}"
+            retries = 2
             
-    wb.save(file_name)
-    wb.close()
-    return rows
-    
-def get_registered_permutations(monitored_domain, registered_domains):
-    logging.info('Start of looking for permutations for (%s)' % (monitored_domain))
-    #registered_domains = dnstwist.run(domain=monitored_domain, registered=True, phash=True, format='null')
-    registered_domains = dnstwist.run(domain=monitored_domain, registered=True, phash=True, format='null', tld="abused_tlds.dict")
-    logging.info('End  of looking for permutations for (%s)' % (monitored_domain)) 
-    logging.info('Start of whois for registered domains for (%s)' % (monitored_domain))
-    
-    for domain in registered_domains:
-        random_number = random.randint(10,20)
-        time.sleep(random_number)
+            for attempt in range(retries + 1):
+                try:
+                    timeout = aiohttp.ClientTimeout(total=3.0, connect=2.0)
+                    async with session.get(url, timeout=timeout, allow_redirects=True) as response:
+                        content_type = response.headers.get('Content-Type', '')
+                        if response.status == 200 and 'image' in content_type:
+                            img_bytes = await response.read()
+                            
+                            def compute():
+                                from io import BytesIO
+                                img = Image.open(BytesIO(img_bytes))
+                                return str(imagehash.phash(img))
+                            
+                            return await asyncio.get_event_loop().run_in_executor(self.executor, compute)
+                    break
+                    
+                except (aiohttp.ClientSSLError, aiohttp.ClientConnectorCertificateError):
+                    # Gracefully bypass certificate drops and retry utilizing port 80 pathing directly
+                    url = f"http://{domain}"
+                    await asyncio.sleep(0.1)
+                except (aiohttp.ClientOSError, aiohttp.ServerDisconnectedError, 
+                        asyncio.TimeoutError, aiohttp.ServerTimeoutError, 
+                        ConnectionResetError, ConnectionRefusedError):
+                    if attempt == retries:
+                        return None
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                except Exception:
+                    return None
+            return None
+
+    async def process_candidate(self, domain, p_type, dns_sem, http_sem, http_session):
+        logger.info(f"[*] Processing Permutation: {domain}")
+        
+        dns_data = await self.resolve_dns_records(domain, dns_sem)
+        if not dns_data["Active"]:
+            return None
+
+        loop = asyncio.get_event_loop()
+        whois_data = await loop.run_in_executor(self.executor, self.fetch_blocking_whois, domain)
+        phash_val = await self.fetch_phash(domain, http_session, http_sem)
+
+        return {
+            "Permutation Type": p_type,
+            "Domain": domain,
+            "Date Created": whois_data["Created"],
+            "Last Updated": whois_data["Updated"],
+            "Registrant Name": whois_data["Registrant"],
+            "Organization": whois_data["Org"],
+            "PHash": phash_val,
+            "Name Server": dns_data["Name Server"],
+            "IP": dns_data["IP"],
+            "Mail Server": dns_data["Mail Server"],
+            "Registered Email 1": whois_data["Email1"],
+            "Registered Email 2": whois_data["Email2"]
+        }
+
+    def build_html_table(self, records):
+        html = """
+        <table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse; font-family: Arial, sans-serif; font-size: 12px;">
+            <tr style="background-color: #f2f2f2;">
+                <th>Permutation Type</th>
+                <th>Domain</th>
+                <th>Date Created</th>
+                <th>Last Updated</th>
+                <th>Registrant Name</th>
+                <th>Organization</th>
+                <th>PHash</th>
+                <th>Name Server</th>
+                <th>IP</th>
+                <th>Mail Server</th>
+                <th>Registered Email 1</th>
+                <th>Registered Email 2</th>
+            </tr>
+        """
+        for r in records:
+            html += f"""
+            <tr>
+                <td>{r.get('Permutation Type') or ''}</td>
+                <td><b>{r.get('Domain') or ''}</b></td>
+                <td>{r.get('Date Created') or ''}</td>
+                <td>{r.get('Last Updated') or ''}</td>
+                <td>{r.get('Registrant Name') or ''}</td>
+                <td>{r.get('Organization') or ''}</td>
+                <td>{r.get('PHash') or ''}</td>
+                <td>{r.get('Name Server') or ''}</td>
+                <td>{r.get('IP') or ''}</td>
+                <td>{r.get('Mail Server') or ''}</td>
+                <td>{r.get('Registered Email 1') or ''}</td>
+                <td>{r.get('Registered Email 2') or ''}</td>
+            </tr>
+            """
+        html += "</table>"
+        return html
+
+    def dispatch_alert_email(self, records, target_excel, primary_domain, is_initial=False):
         try:
-            w = whois.whois(domain["domain"])
-        except Exception:
-            pass
-        else:
-            domain["Created Date"] = w.creation_date
-            domain["Org"] = w.org
-            domain["Name"] = w.name
-            domain["Emails"] = w.emails
-            domain["Updated Date"] = w.updated_date
-            domain["Expiration Date"] = w.expiration_date
-            domain["Status"] = w.status
+            email_config = self.config['EMAIL']
+            sender = email_config.get('sender_email')
+            receiver = email_config.get('receiver_email')
+            password = email_config.get('password')
 
-    logging. info('End of whois for registered domains for (%s)' % (monitored_domain))
-        
-    return registered_domains
+            if not sender or not receiver or not password:
+                logger.info(f"[-] Email configuration missing details. Email skipped for {primary_domain}.")
+                return
+
+            msg = MIMEMultipart('alternative')
+            msg['From'] = sender
+            msg['To'] = receiver
             
-def send_email_with_attachment(subject, body, sender_email,receiver_email, file_name, password):
-    to = ",".join(receiver_email)
+            if is_initial:
+                msg['Subject'] = f"DomainHunter Initial Baseline Scan - {primary_domain}"
+                intro_text = f"Initial baseline tracking loop completed for {primary_domain}. Below is the structural footprint catalog of currently active mutations."
+            else:
+                msg['Subject'] = f"DomainHunter Alert: New Mutations Identified for {primary_domain}"
+                intro_text = f"CRITICAL: New typosquatting/phishing mutations have been identified targeting <b>{primary_domain}</b>."
 
-    # Create a multipart message and set headers
-    message = MIMEMultipart()
-    message["From"] = "TH Domain Alerts"
-    message["To"] = to
-    message["Subject"] = subject
-    message["Bcc"] = ''#receiver_email  # Recommended for mass emails
+            table_html = self.build_html_table(records)
+            html_body = f"""
+            <html>
+                <body>
+                    <p style="font-family: Arial, sans-serif; font-size: 14px;">{intro_text}</p>
+                    <hr/>
+                    <h3>Detected Infrastructure Details ({len(records)} entries):</h3>
+                    {table_html}
+                    <br/>
+                    <p style="font-family: Arial, sans-serif; font-size: 11px; color: #555;">
+                        This is an automated operational metric alert sent by DomainHunter. Full tracking state history is preserved inside {target_excel}.
+                    </p>
+                </body>
+            </html>
+            """
+            msg.attach(MIMEText(html_body, 'html'))
 
-    # Add body to email
-    message.attach(MIMEText(body, "plain"))
+            if os.path.exists(target_excel):
+                with open(target_excel, "rb") as attachment:
+                    part = MIMEBase("application", "octet-stream")
+                    part.set_payload(attachment.read())
+                encoders.encode_base64(part)
+                part.add_header("Content-Disposition", f"attachment; filename={target_excel}")
+                msg.attach(part)
 
-    #file_name = ""  # In same directory as script
+            logger.info("[*] Sending Email...")
+            server = smtplib.SMTP('smtp.gmail.com', 587)
+            server.starttls()
+            server.login(sender, password)
+            server.send_message(msg)
+            server.quit()
+            logger.info("[+] Email Sent Successfully")
+        except Exception as e:
+            logger.info(f"[-] Error sending email: {e}")
 
-    # Open PDF file in binary mode
-    with open(file_name, "rb") as attachment:
-        # Add file as application/octet-stream
-        # Email client can usually download this automatically as attachment
-        part = MIMEBase("application", "octet-stream")
-        part.set_payload(attachment.read())
+    async def scan_single_domain(self, primary_domain, dns_sem, http_sem, session):
+        domain_prefix = primary_domain.split('.')[0]
+        target_excel = f"{domain_prefix}.xlsx"
 
-    # Encode file in ASCII characters to send by email    
-    encoders.encode_base64(part)
-
-    # Add header as key/value pair to attachment part
-    part.add_header(
-        "Content-Disposition",
-        f"attachment; filename= {file_name}",
-    )
-
-    # Add attachment to message and convert message to string
-    message.attach(part)
-    text = message.as_string()
-
-    # Log in to server using secure context and send email
-    context = ssl.create_default_context()
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
-        server.login(sender_email, password)
-        server.sendmail(sender_email, receiver_email, text)
-
-    logging.info('Initial registered domain email sent.')
+        logger.info(f"\n[*] Target Domain: {primary_domain}")
+        target_map = self.generate_permutations(primary_domain)
         
-def send_new_domain_alert_email(subject, text, html, sender_email, receiver_email, file_name, password):
-    to = ",".join(receiver_email)
-    message = MIMEMultipart("alternative")
-    message["Subject"] = subject
-    message["From"] = "TH Domain Alerts"
-    message["To"] = to
+        if not target_map:
+            logger.info(f"[-] No permutations generated for: {primary_domain}")
+            return
 
-    # Turn these into plain/html MIMEText objects
-    part1 = MIMEText(text, "plain")
-    part2 = MIMEText(html, "html")
+        logger.info(f"[*] Analyzing {len(target_map)} unique structural mutations for {primary_domain}...")
+        
+        tasks = [
+            self.process_candidate(dom, p_type, dns_sem, http_sem, session)
+            for dom, p_type in target_map.items()
+        ]
+        
+        resolved_outputs = await asyncio.gather(*tasks)
+        active_records = [r for r in resolved_outputs if r is not None]
 
-    # Add HTML/plain-text parts to MIMEMultipart message
-    # The email client will try to render the last part first
-    message.attach(part1)
-    message.attach(part2)
-    
-    #file_name = ""  # In same directory as script
+        is_initial_run = not os.path.exists(target_excel)
+        new_discoveries = []
 
-    # Open PDF file in binary mode
-    with open(file_name, "rb") as attachment:
-        # Add file as application/octet-stream
-        # Email client can usually download this automatically as attachment
-        part = MIMEBase("application", "octet-stream")
-        part.set_payload(attachment.read())
+        if is_initial_run:
+            logger.info(f"[*] Excel document '{target_excel}' does not exist. Creating file and generating baseline entries...")
+            if active_records:
+                df_new = pd.DataFrame(active_records)
+                df_new.to_excel(target_excel, index=False)
+                logger.info(f"[+] Baseline dataset generated inside -> {target_excel}")
+                self.dispatch_alert_email(active_records, target_excel, primary_domain, is_initial=True)
+            else:
+                df_empty = pd.DataFrame(columns=[
+                    "Permutation Type", "Domain", "Date Created", "Last Updated", 
+                    "Registrant Name", "Organization", "PHash", "Name Server", 
+                    "IP", "Mail Server", "Registered Email 1", "Registered Email 2"
+                ])
+                df_empty.to_excel(target_excel, index=False)
+                logger.info(f"[*] Baseline established for {primary_domain}, but no active permutations were discovered.")
+        else:
+            try:
+                df_existing = pd.read_excel(target_excel)
+                existing_domains = set(df_existing['Domain'].astype(str).str.lower().tolist())
+            except Exception:
+                existing_domains = set()
+                df_existing = pd.DataFrame()
 
-    # Encode file in ASCII characters to send by email    
-    encoders.encode_base64(part)
+            for record in active_records:
+                if record['Domain'].lower() not in existing_domains:
+                    new_discoveries.append(record)
 
-    # Add header as key/value pair to attachment part
-    part.add_header(
-        "Content-Disposition",
-        f"attachment; filename= {file_name}",
-    )
+            if new_discoveries:
+                logger.info(f"[+] New variations found! Adding to {target_excel} and sending email alert...")
+                df_delta = pd.DataFrame(new_discoveries)
+                df_final = pd.concat([df_existing, df_delta], ignore_index=True)
+                df_final.to_excel(target_excel, index=False)
+                self.dispatch_alert_email(new_discoveries, target_excel, primary_domain, is_initial=False)
+            else:
+                logger.info("[-] No new variations found.")
 
-    # Add attachment to message and convert message to string
-    message.attach(part)
-    text = message.as_string()
+    async def pipeline_execution(self):
+        if not self.monitored_domains:
+            logger.info("[-] Monitored domains target list is empty. Please add domains to monitored_domains.txt")
+            return
 
+        dns_sem = asyncio.Semaphore(MAX_CONCURRENT_DNS)
+        http_sem = asyncio.Semaphore(MAX_CONCURRENT_HTTP)
+        
+        connector = aiohttp.TCPConnector(limit_per_host=2, ttl_dns_cache=300)
+        async with aiohttp.ClientSession(connector=connector) as session:
+            for primary_domain in self.monitored_domains:
+                await self.scan_single_domain(primary_domain, dns_sem, http_sem, session)
 
-    # Create secure connection with server and send email
-    context = ssl.create_default_context()
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
-        server.login(sender_email, password)
-        server.sendmail(sender_email, receiver_email, message.as_string())
+    def run(self):
+        asyncio.run(self.pipeline_execution())
 
-    logging.info('New domain email sent.')
-
-logging.info('Start of program')
-
-
-for monitored_domain in domain_list:
-    client = monitored_domain.split(".")
-    file_name = client[0] + ".xlsx"
-    registered = []
-    registered_domains = []
-    today = date.today()
-
-    registered = get_registered_permutations(monitored_domain, registered_domains)
-    registered_domains = registered
-
-    try:
-        wb = load_workbook(file_name)
-    except:
-        create_fill_initial_excel_for_domain(file_name, registered_domains)
-        client_name = client[0].title()
-        subject = "TH: Initial similar domain report for %s." % client_name
-        body = "Hello,\nHere is the Excel document containing all similarly registered domains for %s for %s." % (monitored_domain, client_name)
-        send_email_with_attachment(subject, body, sender_email, receiver_email, file_name, password)
-    else:
-        existing_domains = []
-        new_domains = []
-        rows = 1
-        rows = get_new_domains(file_name, registered_domains, existing_domains, new_domains, rows)
-        append_new_domains(registered_domains, new_domains, file_name, rows, receiver_email, today)
-
-logging.info('End of program')
+if __name__ == "__main__":
+    hunter = AdvancedDomainHunter()
+    hunter.run()

@@ -1,6 +1,8 @@
-dnstwist
-python-whois
-openpyxl
-Pillow
-selenium
+aiohttp
 dnspython
+ImageHash
+openpyxl
+pandas
+Pillow
+python-whois
+requests
