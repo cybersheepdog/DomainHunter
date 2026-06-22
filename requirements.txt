@@ -1,8 +1,7 @@
-aiohttp
 dnspython
 ImageHash
 openpyxl
 pandas
 Pillow
+playwright
 python-whois
-requests
