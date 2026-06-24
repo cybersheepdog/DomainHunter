@@ -8,3 +8,4 @@ monitored_domains.txt
 lib64
 images/
 include/
+domainhunter.log
