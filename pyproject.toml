@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "domainhunter"
+version = "1.0.0"
+description = "Typosquat / phishing infrastructure hunter with batch scanning and real-time Certificate Transparency monitoring."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "aiohttp",
+    "dnspython",
+    "ImageHash",
+    "openpyxl",
+    "pandas",
+    "Pillow",
+    "playwright",
+    "python-whois",
+]
+
+[project.optional-dependencies]
+# Visual-clone detection needs a browser: `pip install domainhunter[visual]`
+# then `playwright install chromium`.
+visual = ["playwright"]
+
+[project.scripts]
+domainhunter = "domainhunter:main"
+domainhunter-monitor = "realtime_monitor:main"
+
+[tool.setuptools]
+py-modules = ["domainhunter", "realtime_monitor"]

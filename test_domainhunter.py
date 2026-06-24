@@ -29,6 +29,7 @@ class HunterTestBase(unittest.TestCase):
 
     def tearDown(self):
         self.hunter.executor.shutdown(wait=False)
+        self.hunter.whois_executor.shutdown(wait=False)
         self.tmp.cleanup()
 
 
@@ -51,6 +52,13 @@ class TestPermutations(HunterTestBase):
 
     def test_short_domain_returns_empty(self):
         self.assertEqual(self.hunter.generate_permutations("localhost"), {})
+
+    def test_no_case_variant_of_original(self):
+        # Regression: bitsquatting flips the ASCII case bit; case variants must not be
+        # emitted as permutations (DNS is case-insensitive -> same host as original).
+        perms = self.hunter.generate_permutations("google.com")
+        self.assertTrue(all(k == k.lower() for k in perms), "all permutation keys must be lowercase")
+        self.assertNotIn("google.com", {k.lower() for k in perms})
 
 
 class TestClassification(HunterTestBase):
@@ -110,6 +118,16 @@ class TestHelpers(HunterTestBase):
         self.assertEqual(AdvancedDomainHunter._esc(None), "")
         self.assertEqual(AdvancedDomainHunter._esc('a"&b'), "a&quot;&amp;b")
 
+    def test_norm(self):
+        self.assertEqual(AdvancedDomainHunter._norm(None), "")
+        self.assertEqual(AdvancedDomainHunter._norm("nan"), "")
+        self.assertEqual(AdvancedDomainHunter._norm("  x "), "x")
+
+    def test_parse_retry_after(self):
+        self.assertEqual(AdvancedDomainHunter._parse_retry_after("5"), 5.0)
+        self.assertIsNone(AdvancedDomainHunter._parse_retry_after(None))
+        self.assertIsNone(AdvancedDomainHunter._parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT"))
+
 
 class TestHtmlTableEscaping(HunterTestBase):
     def test_injection_is_escaped(self):
@@ -124,6 +142,79 @@ class TestHtmlTableEscaping(HunterTestBase):
         self.assertIn("&lt;script&gt;", out)
         # A close visual distance should be highlighted as a clone.
         self.assertIn("visual clone", out)
+
+
+class TestChangeDetection(HunterTestBase):
+    def test_detects_real_change_and_ignores_data_loss(self):
+        existing = [
+            {"Domain": "evil.com", "IP": "1.1.1.1", "Name Server": "ns1.x", "Registrant Name": "Joe"},
+            {"Domain": "calm.com", "IP": "9.9.9.9", "Name Server": "ns.calm", "Registrant Name": "Ann"},
+        ]
+        by_domain = {r["Domain"].lower(): r for r in existing}
+        active = [
+            {"Domain": "evil.com", "IP": "2.2.2.2", "Name Server": "ns1.x", "Registrant Name": ""},  # IP changed; registrant lost -> ignore loss
+            {"Domain": "calm.com", "IP": "9.9.9.9", "Name Server": "ns.calm", "Registrant Name": "Ann"},  # unchanged
+        ]
+        changes, updated = self.hunter.detect_changes(active, by_domain)
+        fields = {(c["Field"], c["New"]) for c in changes}
+        self.assertEqual(fields, {("IP", "2.2.2.2")})
+        self.assertIn("evil.com", updated)
+        self.assertNotIn("calm.com", updated)
+
+    def test_unknown_domain_skipped(self):
+        active = [{"Domain": "brandnew.com", "IP": "1.2.3.4"}]
+        changes, updated = self.hunter.detect_changes(active, {})
+        self.assertEqual(changes, [])
+        self.assertEqual(updated, {})
+
+
+class TestAssembleRecord(HunterTestBase):
+    def test_shape_and_mapping(self):
+        dns_data = {"IP": "1.2.3.4", "Name Server": "ns1", "Mail Server": "mx1", "Active": True}
+        reg = {"Created": "2020-01-01", "Updated": "2021-02-02", "Registrant": "Joe",
+               "Org": "Acme", "Email1": "a@x.com", "Email2": None}
+        rec = AdvancedDomainHunter._assemble_record("evil.com", "Omission", "CT-RT", dns_data, reg, "abc", 7)
+        self.assertEqual(set(rec.keys()), set(self.hunter.EXCEL_COLUMNS))
+        self.assertEqual(rec["Domain"], "evil.com")
+        self.assertEqual(rec["Discovery Source"], "CT-RT")
+        self.assertEqual(rec["Date Created"], "2020-01-01")
+        self.assertEqual(rec["IP"], "1.2.3.4")
+        self.assertEqual(rec["Visual Distance"], 7)
+        self.assertEqual(rec["Registered Email 1"], "a@x.com")
+
+
+class TestRdapParsing(HunterTestBase):
+    def test_events_and_entities(self):
+        data = {
+            "events": [
+                {"eventAction": "registration", "eventDate": "1997-09-15T04:00:00Z"},
+                {"eventAction": "last changed", "eventDate": "2023-08-20T09:00:00Z"},
+            ],
+            "entities": [
+                {"roles": ["registrant"], "vcardArray": ["vcard", [
+                    ["version", {}, "text", "4.0"],
+                    ["fn", {}, "text", "Jane Doe"],
+                    ["org", {}, "text", "Example LLC"],
+                    ["email", {}, "text", "jane@example.com"],
+                ]]},
+            ],
+        }
+        out = self.hunter._parse_rdap(data)
+        self.assertEqual(out["Created"], "1997-09-15")
+        self.assertEqual(out["Updated"], "2023-08-20")
+        self.assertEqual(out["Registrant"], "Jane Doe")
+        self.assertEqual(out["Org"], "Example LLC")
+        self.assertEqual(out["Email1"], "jane@example.com")
+
+    def test_empty(self):
+        out = self.hunter._parse_rdap({})
+        self.assertIsNone(out["Created"])
+        self.assertIsNone(out["Registrant"])
+
+    def test_vcard_org_as_list(self):
+        vcard = ["vcard", [["org", {}, "text", ["Example LLC", "Dept"]]]]
+        name, org, email = self.hunter._parse_vcard(vcard)
+        self.assertEqual(org, "Example LLC")
 
 
 if __name__ == "__main__":

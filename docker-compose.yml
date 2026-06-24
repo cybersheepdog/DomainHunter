@@ -1,0 +1,40 @@
+# DomainHunter stack: a self-hosted CertStream server plus the real-time monitor and an
+# on-demand batch scanner. Self-hosting CertStream avoids the flaky public firehose.
+#
+#   docker compose up -d certstream monitor      # start the live monitor
+#   docker compose run --rm scanner              # one-off batch sweep
+#
+# Put config.ini, monitored_domains.txt and abused_tlds.dict in ./data (a bind mount),
+# and set the SMTP password via the DOMAINHUNTER_EMAIL_PASSWORD env var (e.g. a .env file).
+
+services:
+  # Community Go rewrite of CaliDog's CertStream server. Exposes a WS firehose on :8080.
+  certstream:
+    image: ghcr.io/d-rickyy-b/certstream-server-go:latest
+    restart: unless-stopped
+    # Optional: expose locally for debugging -> "ws://localhost:8080/"
+    # ports:
+    #   - "8080:8080"
+
+  monitor:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - certstream
+    environment:
+      - DOMAINHUNTER_EMAIL_PASSWORD=${DOMAINHUNTER_EMAIL_PASSWORD:-}
+      - DOMAINHUNTER_BROWSER_NO_SANDBOX=1
+    volumes:
+      - ./data:/data
+    command: ["/app/realtime_monitor.py", "--url", "ws://certstream:8080/"]
+
+  # Run on demand (docker compose run --rm scanner) or drive on a host cron / scheduler.
+  scanner:
+    build: .
+    environment:
+      - DOMAINHUNTER_EMAIL_PASSWORD=${DOMAINHUNTER_EMAIL_PASSWORD:-}
+      - DOMAINHUNTER_BROWSER_NO_SANDBOX=1
+    volumes:
+      - ./data:/data
+    command: ["/app/domainhunter.py"]
+    profiles: ["batch"]   # not started by default `up`; use `docker compose run scanner`

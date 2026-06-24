@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.xlsx
+*.state.json
+realtime_seen.json
+domainhunter.log
+.git/
+.gitignore
+bin/
+lib/
+pyvenv.cfg
+config.ini
+monitored_domains.txt
+data/
