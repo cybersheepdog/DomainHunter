@@ -8,3 +8,10 @@ monitored_domains.txt
 domainhunter.log
 include/
 lib64
+.env
+data/
+.data/
+*.state.json
+realtime_seen.json
+domainhunter.log
+__pycache__/

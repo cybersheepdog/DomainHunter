@@ -10,8 +10,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# App code.
+# App code + brand assets (the email footer logo lives in brand/).
 COPY domainhunter.py realtime_monitor.py ./
+COPY brand/ ./brand/
 
 # Runtime data (config, monitored list, workbooks, state) lives in /data so it can be
 # mounted as a volume and survive container rebuilds.

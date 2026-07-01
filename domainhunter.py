@@ -22,6 +22,7 @@ import whois
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
+from email.mime.image import MIMEImage
 from email import encoders
 from PIL import Image
 
@@ -47,6 +48,10 @@ CHANGE_DETECTION = True      # Alert when a tracked domain's infrastructure chan
 
 RDAP_BOOTSTRAP_URL = "https://rdap.org/domain/{domain}"
 CRTSH_URL = "https://crt.sh/?q={domain}&output=json"
+
+# Brand logo shown at the foot of every alert email (embedded inline via Content-ID).
+LOGO_CID = "domainhunter_logo"
+LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "brand", "domainhunter-logo-email.png")
 
 # Configure Logging. Everything (including DEBUG) is written to the log file so failures
 # stay diagnosable; the console stays at INFO unless DOMAINHUNTER_DEBUG is set.
@@ -879,11 +884,35 @@ class AdvancedDomainHunter:
                 logger.info("[-] Email configuration missing details. Email skipped.")
                 return
 
-            msg = MIMEMultipart('alternative')
+            msg = MIMEMultipart('related')
             msg['From'] = sender
             msg['To'] = receiver
             msg['Subject'] = subject
+
+            # Brand footer on every email. The logo is embedded inline (cid:) below; the
+            # alt text is shown if the image is unavailable for any reason.
+            footer = (
+                '<hr style="border:none;border-top:1px solid #E1E6EC;margin:26px 0 12px"/>'
+                f'<img src="cid:{LOGO_CID}" width="240" '
+                'alt="DomainHunter — typosquat &amp; phishing threat hunting" '
+                'style="display:block;height:auto;max-width:240px"/>'
+            )
+            if "</body>" in html_body:
+                html_body = html_body.replace("</body>", footer + "</body>", 1)
+            else:
+                html_body = html_body + footer
             msg.attach(MIMEText(html_body, 'html'))
+
+            # Inline logo (Content-ID). Attached once; referenced by the footer above.
+            if os.path.exists(LOGO_PATH):
+                try:
+                    with open(LOGO_PATH, "rb") as lf:
+                        logo = MIMEImage(lf.read())
+                    logo.add_header("Content-ID", f"<{LOGO_CID}>")
+                    logo.add_header("Content-Disposition", "inline", filename="domainhunter-logo.png")
+                    msg.attach(logo)
+                except Exception as e:
+                    logger.debug(f"Could not attach logo: {e}")
 
             if target_excel and os.path.exists(target_excel):
                 with open(target_excel, "rb") as attachment:

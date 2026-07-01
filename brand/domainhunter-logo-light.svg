@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 200" role="img" width="780" height="200" font-family="'Segoe UI', Arial, sans-serif">
+  <title>DomainHunter logo (for light backgrounds)</title>
+  <desc>DomainHunter wordmark with the hunting-scope-over-globe icon, dark ink for light surfaces.</desc>
+  <g transform="translate(24,40)">
+    <g fill="none" stroke="#0B0F14" stroke-width="3" stroke-linecap="round" opacity="0.55">
+      <path d="M12 30 V12 H30"/><path d="M90 12 H108 V30"/><path d="M108 90 V108 H90"/><path d="M30 108 H12 V90"/>
+    </g>
+    <path d="M60 60 L100.4 45.3 A43 43 0 0 1 97.2 81.5 Z" fill="#0E8C7C" opacity="0.16"/>
+    <circle cx="60" cy="60" r="43" fill="none" stroke="#0E8C7C" stroke-width="3"/>
+    <g stroke="#0B0F14" stroke-width="3" stroke-linecap="round">
+      <line x1="60" y1="13" x2="60" y2="30"/><line x1="60" y1="90" x2="60" y2="107"/><line x1="13" y1="60" x2="30" y2="60"/><line x1="90" y1="60" x2="107" y2="60"/>
+    </g>
+    <g fill="none" stroke="#0B0F14" stroke-width="2">
+      <circle cx="60" cy="60" r="22"/><line x1="38" y1="60" x2="82" y2="60"/><ellipse cx="60" cy="60" rx="8" ry="22"/><ellipse cx="60" cy="60" rx="17" ry="22"/>
+    </g>
+    <circle cx="97" cy="38" r="4.5" fill="#D98200"/>
+  </g>
+  <text x="168" y="118" font-size="56" font-weight="800" letter-spacing="0.5">
+    <tspan fill="#0B0F14">DOMAIN</tspan><tspan fill="#0E8C7C">HUNTER</tspan>
+  </text>
+  <text x="170" y="150" font-family="ui-monospace,'Courier New',monospace" font-size="13" letter-spacing="3.5" fill="#6B7686">&#62;_ TYPOSQUAT &#183; PHISHING &#183; THREAT HUNTING</text>
+</svg>
