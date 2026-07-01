@@ -8,10 +8,11 @@ monitored_domains.txt
 domainhunter.log
 include/
 lib64
+
+# Secrets and runtime data (never commit)
 .env
 data/
 .data/
 *.state.json
 realtime_seen.json
-domainhunter.log
 __pycache__/

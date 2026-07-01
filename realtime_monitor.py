@@ -92,6 +92,8 @@ class RealtimeMonitor:
             cand = '.'.join(labels[i:])
             hit = self.index.get(cand)
             if hit:
+                if self.hunter._is_ignored(cand):
+                    return None
                 return cand, hit
         return None
 

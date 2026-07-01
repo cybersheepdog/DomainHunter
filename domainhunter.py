@@ -45,6 +45,15 @@ VISUAL_MATCH_THRESHOLD = 10  # Max perceptual-hash Hamming distance to flag a vi
 
 CT_DISCOVERY = False         # Opt-in: check crt.sh for permutations that don't resolve
 CHANGE_DETECTION = True      # Alert when a tracked domain's infrastructure changes
+CHANGE_CONFIRM_RUNS = 2      # Require a change to persist across this many scans before alerting
+SUPPRESS_OWN_INFRA = True    # Don't alert on look-alikes that resolve to the protected domain's own IPs
+
+# Nameserver substrings that indicate registrar/domain parking — a benign "activation".
+DEFAULT_PARKING_NS = [
+    "sedoparking", "bodis", "parkingcrew", "above.com", "afternic", "hugedomains",
+    "dan.com", "parklogic", "voodoo.com", "fastpark", "cashparking", "sedo.com",
+    "uniregistrymarket", "domainparking", "parkingpage", "name-services.com",
+]
 
 RDAP_BOOTSTRAP_URL = "https://rdap.org/domain/{domain}"
 CRTSH_URL = "https://crt.sh/?q={domain}&output=json"
@@ -73,25 +82,31 @@ logger.addHandler(console_handler)
 
 
 class AdvancedDomainHunter:
-    # Fields watched for change detection on already-tracked domains.
-    WATCHED_FIELDS = ["IP", "Name Server", "Mail Server", "Registrant Name", "Organization"]
-
     EXCEL_COLUMNS = [
-        "Permutation Type", "Domain", "Discovery Source", "Date Created", "Last Updated",
+        "Permutation Type", "Domain", "Discovery Source", "Detected", "Date Created", "Last Updated",
         "Registrant Name", "Organization", "PHash", "Visual Distance",
         "Name Server", "IP", "Mail Server", "Registered Email 1", "Registered Email 2"
     ]
 
-    def __init__(self, config_path="config.ini", target_domains_path="monitored_domains.txt", tlds_dict_path="abused_tlds.dict"):
+    def __init__(self, config_path="config.ini", target_domains_path="monitored_domains.txt",
+                 tlds_dict_path="abused_tlds.dict", ignored_domains_path="ignored_domains.txt",
+                 parking_ns_path="parking_nameservers.txt"):
         self.config_path = config_path
         self.target_domains_path = target_domains_path
         self.tlds_dict_path = tlds_dict_path
+        self.ignored_domains_path = ignored_domains_path
+        self.parking_ns_path = parking_ns_path
 
         self.config = configparser.ConfigParser()
         self.load_config()
 
         self.monitored_domains = self._load_file_lines(self.target_domains_path)
         self.abused_tlds = self._load_file_lines(self.tlds_dict_path)
+        # Optional allow-list of domains that should never alert (partners, CDNs, your own).
+        self.ignored_domains = set(self._load_optional_lines(self.ignored_domains_path))
+        # Parking-provider nameserver substrings (file overrides the built-in defaults).
+        _parking = self._load_optional_lines(self.parking_ns_path)
+        self.parking_ns = _parking if _parking else list(DEFAULT_PARKING_NS)
 
         # Two pools: blocking WHOIS fallback is isolated from phash computation so they
         # never starve each other.
@@ -168,6 +183,18 @@ class AdvancedDomainHunter:
             'visual_match_threshold': str(VISUAL_MATCH_THRESHOLD),
             'ct_discovery': str(CT_DISCOVERY),
             'change_detection': str(CHANGE_DETECTION),
+            # Which infrastructure transitions raise a change alert. Defaults are tuned
+            # to fire only on likely adversary-infra-going-live events and stay quiet on
+            # benign churn (CDN/round-robin IP rotation, WHOIS-privacy flicker).
+            'alert_on_visual_clone': 'True',
+            'alert_on_mail': 'True',
+            'alert_on_activation': 'True',
+            'alert_on_nameserver': 'True',
+            'alert_on_ip': 'False',
+            'alert_on_registrant': 'False',
+            'change_confirm_runs': str(CHANGE_CONFIRM_RUNS),
+            'suppress_own_infra': str(SUPPRESS_OWN_INFRA),
+            'parking_ip_prefixes': '',
         }
         if 'SCAN' not in self.config:
             self.config['SCAN'] = scan_defaults
@@ -218,11 +245,29 @@ class AdvancedDomainHunter:
         self.visual_match_threshold = _int('visual_match_threshold', VISUAL_MATCH_THRESHOLD)
         self.ct_discovery = _bool('ct_discovery', CT_DISCOVERY)
         self.change_detection = _bool('change_detection', CHANGE_DETECTION)
+        self.alert_on_visual_clone = _bool('alert_on_visual_clone', True)
+        self.alert_on_mail = _bool('alert_on_mail', True)
+        self.alert_on_activation = _bool('alert_on_activation', True)
+        self.alert_on_nameserver = _bool('alert_on_nameserver', True)
+        self.alert_on_ip = _bool('alert_on_ip', False)
+        self.alert_on_registrant = _bool('alert_on_registrant', False)
+        self.change_confirm_runs = _int('change_confirm_runs', CHANGE_CONFIRM_RUNS)
+        self.suppress_own_infra = _bool('suppress_own_infra', SUPPRESS_OWN_INFRA)
+        self.parking_ip_prefixes = [p.strip() for p in
+                                    self.config.get('SCAN', 'parking_ip_prefixes', fallback='').split(',')
+                                    if p.strip()]
 
     def _load_file_lines(self, path):
         if not os.path.exists(path):
             logger.info(f"[-] Warning: Reference file '{path}' not found. Creating empty file.")
             with open(path, 'w') as f: pass
+            return []
+        with open(path, 'r') as f:
+            return [line.strip().lower().lstrip('.') for line in f if line.strip() and not line.startswith('#')]
+
+    def _load_optional_lines(self, path):
+        """Like _load_file_lines but returns [] if the file is absent (no file created)."""
+        if not os.path.exists(path):
             return []
         with open(path, 'r') as f:
             return [line.strip().lower().lstrip('.') for line in f if line.strip() and not line.startswith('#')]
@@ -350,13 +395,138 @@ class AdvancedDomainHunter:
                 new_discoveries.append(record)
         return new_discoveries, silent_additions
 
+    @staticmethod
+    def _as_set(value):
+        """Split a comma-joined multi-value field into a set (order-insensitive compare)."""
+        s = AdvancedDomainHunter._norm(value)
+        return {x.strip() for x in s.split(",") if x.strip()} if s else set()
+
+    def _is_clone(self, vd):
+        """True if a Visual Distance value indicates a visual clone (NaN-safe)."""
+        return isinstance(vd, (int, float)) and vd == vd and vd <= self.visual_match_threshold
+
+    def _is_ignored(self, domain):
+        """True if the domain (or any parent suffix) is on the ignore allow-list."""
+        d = str(domain).strip().lower()
+        if not d:
+            return False
+        labels = d.split('.')
+        for i in range(len(labels) - 1):
+            if '.'.join(labels[i:]) in self.ignored_domains:
+                return True
+        return d in self.ignored_domains
+
+    def _is_parking_ns(self, ns_set):
+        return any(any(p in ns.lower() for p in self.parking_ns) for ns in ns_set)
+
+    def _is_parking_ip(self, ip_set):
+        if not self.parking_ip_prefixes:
+            return False
+        return any(ip.startswith(pref) for ip in ip_set for pref in self.parking_ip_prefixes)
+
+    def _looks_parked(self, record):
+        """A domain sitting on registrar/domain parking is a benign 'activation'."""
+        return self._is_parking_ns(self._as_set(record.get("Name Server"))) or \
+            self._is_parking_ip(self._as_set(record.get("IP")))
+
+    @staticmethod
+    def _functional_mx(mx_set):
+        """Drop placeholder / non-deliverable MX hosts (null MX already becomes empty)."""
+        bad = {"", "localhost", "0.0.0.0", "null", "invalid"}
+        return {m for m in mx_set if m.strip().lower() not in bad}
+
+    def _is_own_infra(self, record, primary_ips):
+        """True if the look-alike resolves to one of the protected domain's own IPs
+        (a defensive registration / the org's own redirect), so it isn't a threat."""
+        if not primary_ips:
+            return False
+        return bool(self._as_set(record.get("IP")) & primary_ips)
+
+    @staticmethod
+    def _event_sig(change):
+        return f"{str(change.get('Domain','')).lower()}|{change.get('Event')}|{change.get('New')}"
+
+    def _confirm_changes(self, raw_changes, state):
+        """Two-scan (N-scan) confirmation: only return a change once it has been observed
+        on `change_confirm_runs` consecutive scans. Pending counts live in the state file;
+        transitions that revert simply drop out. Returns (confirmed, confirmed_domains)."""
+        if self.change_confirm_runs <= 1:
+            return raw_changes, {str(c.get('Domain', '')).lower() for c in raw_changes}
+        pending = state.get('pending_changes', {}) or {}
+        confirmed, next_pending = [], {}
+        for c in raw_changes:
+            sig = self._event_sig(c)
+            count = int(pending.get(sig, 0)) + 1
+            if count >= self.change_confirm_runs:
+                confirmed.append(c)
+            else:
+                next_pending[sig] = count
+        state['pending_changes'] = next_pending
+        return confirmed, {str(c.get('Domain', '')).lower() for c in confirmed}
+
+    def _classify_changes(self, old, new):
+        """Return only HIGH-SIGNAL infrastructure transitions between the stored row and a
+        fresh scan — the kind that indicate a look-alike is standing up adversary infra —
+        rather than every field diff. Multi-value records are compared as unordered sets.
+        Which events fire is governed by the alert_on_* config toggles.
+        """
+        events = []
+        detected = new.get("Detected") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        def ev(desc, o, n, sev):
+            events.append({"Domain": new.get("Domain"), "Event": desc, "Old": o, "New": n,
+                           "Severity": sev, "Detected": detected, "PHash": new.get("PHash")})
+
+        old_ip, new_ip = self._as_set(old.get("IP")), self._as_set(new.get("IP"))
+        old_mx, new_mx = self._as_set(old.get("Mail Server")), self._as_set(new.get("Mail Server"))
+        old_ns, new_ns = self._as_set(old.get("Name Server")), self._as_set(new.get("Name Server"))
+
+        # Strongest signal: the page now visually matches the protected brand.
+        if self.alert_on_visual_clone and self._is_clone(new.get("Visual Distance")) and not self._is_clone(old.get("Visual Distance")):
+            ev("Now serves a look-alike page (visual clone)", "no visual match",
+               str(new.get("Visual Distance")), "CRITICAL")
+
+        # Mail infrastructure appearing/changing — credential harvesting / BEC prep.
+        # Placeholder/null MX is filtered so vanity records don't look like real mail.
+        old_mx, new_mx = self._functional_mx(old_mx), self._functional_mx(new_mx)
+        if self.alert_on_mail and new_mx and not old_mx:
+            ev("Mail server went live (possible credential / BEC infra)",
+               "none", ", ".join(sorted(new_mx)), "HIGH")
+        elif self.alert_on_mail and new_mx and old_mx and new_mx != old_mx:
+            ev("Mail server changed", ", ".join(sorted(old_mx)), ", ".join(sorted(new_mx)), "HIGH")
+
+        # A parked / non-resolving look-alike started resolving — but only flag it if it
+        # landed on real hosting, not registrar/domain parking (the common benign case).
+        if self.alert_on_activation and new_ip and not old_ip and not self._looks_parked(new):
+            ev("Domain started resolving (went live)", "not resolving",
+               ", ".join(sorted(new_ip)), "HIGH")
+
+        # Re-delegation to real hosting (e.g. registrar parking -> live host). Moves TO
+        # parking are ignored as benign.
+        if self.alert_on_nameserver and old_ns and new_ns and old_ns != new_ns and not self._is_parking_ns(new_ns):
+            ev("Name servers changed (re-delegated)",
+               ", ".join(sorted(old_ns)), ", ".join(sorted(new_ns)), "MEDIUM")
+
+        # Off by default — IP rotation within a host/CDN is the dominant source of noise.
+        if self.alert_on_ip and old_ip and new_ip and old_ip != new_ip:
+            ev("IP address changed", ", ".join(sorted(old_ip)), ", ".join(sorted(new_ip)), "LOW")
+
+        # Off by default — WHOIS-privacy toggling makes these unreliable.
+        if self.alert_on_registrant:
+            for field, label in (("Registrant Name", "Registrant name"), ("Organization", "Organization")):
+                o, n = self._norm(old.get(field)), self._norm(new.get(field))
+                if n and o and n != o:
+                    ev(f"{label} changed", o, n, "LOW")
+
+        return events
+
     def detect_changes(self, active_records, existing_by_domain):
         """Compare freshly-scanned active records against the last-stored row for the same
-        domain. Returns (changes, updated) where `changes` is a list of
-        {Domain, Field, Old, New} dicts and `updated` maps domain.lower() -> new record.
+        domain and return only high-signal transitions (see _classify_changes).
 
-        A change is only reported when the NEW value is non-empty and differs from the old
-        one, so transient data loss (e.g. RDAP redaction) doesn't generate noise.
+        Returns (changes, updated): `changes` is a list of {Domain, Event, Old, New,
+        Severity}; `updated` maps domain.lower() -> new record for the rows that changed
+        (so the workbook is refreshed and the same event won't re-alert next run).
         Pure function — no I/O — so it can be unit tested directly.
         """
         changes, updated = [], {}
@@ -365,15 +535,16 @@ class AdvancedDomainHunter:
             old = existing_by_domain.get(dom)
             if not old:
                 continue
-            row_changes = []
-            for field in self.WATCHED_FIELDS:
-                o = self._norm(old.get(field))
-                n = self._norm(rec.get(field))
-                if n and n != o:
-                    row_changes.append({"Domain": rec.get("Domain"), "Field": field, "Old": o, "New": n})
-            if row_changes:
-                updated[dom] = rec
-                changes.extend(row_changes)
+            evs = self._classify_changes(old, rec)
+            if evs:
+                stored = dict(rec)
+                # Keep the original first-seen time in the workbook; the change email
+                # already carries the change's own detection time.
+                first_seen = self._norm(old.get("Detected"))
+                if first_seen:
+                    stored["Detected"] = first_seen
+                updated[dom] = stored
+                changes.extend(evs)
         return changes, updated
 
     def generate_permutations(self, domain):
@@ -502,14 +673,16 @@ class AdvancedDomainHunter:
                 self._resolve(domain, 'NS'),
             )
 
+            # Sorted so record ordering (round-robin DNS returns a different order each
+            # query) never looks like a change.
             if a_ans is not None:
-                results["IP"] = ", ".join(str(ip) for ip in a_ans)
+                results["IP"] = ", ".join(sorted(str(ip) for ip in a_ans))
                 results["Active"] = True
             if mx_ans is not None:
-                results["Mail Server"] = ", ".join(str(mx.exchange).rstrip('.') for mx in mx_ans)
+                results["Mail Server"] = ", ".join(sorted(str(mx.exchange).rstrip('.') for mx in mx_ans))
                 results["Active"] = True
             if ns_ans is not None:
-                results["Name Server"] = ", ".join(str(ns.target).rstrip('.') for ns in ns_ans)
+                results["Name Server"] = ", ".join(sorted(str(ns.target).rstrip('.') for ns in ns_ans))
                 results["Active"] = True
 
             return results
@@ -734,12 +907,16 @@ class AdvancedDomainHunter:
             return None
 
     @staticmethod
-    def _assemble_record(domain, p_type, source, dns_data, reg, phash_val, distance):
-        """Build a single result row from the gathered signals. Pure — unit-testable."""
+    def _assemble_record(domain, p_type, source, dns_data, reg, phash_val, distance, detected=None):
+        """Build a single result row from the gathered signals. Pure — unit-testable.
+        `detected` is the local time the domain was observed (defaults to now)."""
+        if detected is None:
+            detected = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         return {
             "Permutation Type": p_type,
             "Domain": domain,
             "Discovery Source": source,
+            "Detected": detected,
             "Date Created": reg["Created"],
             "Last Updated": reg["Updated"],
             "Registrant Name": reg["Registrant"],
@@ -806,6 +983,7 @@ class AdvancedDomainHunter:
                 <th>Permutation Type</th>
                 <th>Domain</th>
                 <th>Discovery Source</th>
+                <th>Detected</th>
                 <th>Date Created</th>
                 <th>Last Updated</th>
                 <th>Registrant Name</th>
@@ -831,6 +1009,7 @@ class AdvancedDomainHunter:
                 <td>{esc(r.get('Permutation Type'))}</td>
                 <td><b>{esc(r.get('Domain'))}</b></td>
                 <td>{esc(r.get('Discovery Source'))}</td>
+                <td>{esc(r.get('Detected'))}</td>
                 <td>{esc(r.get('Date Created'))}</td>
                 <td>{esc(r.get('Last Updated'))}</td>
                 <td>{esc(r.get('Registrant Name'))}</td>
@@ -847,24 +1026,34 @@ class AdvancedDomainHunter:
         table += "</table>"
         return table
 
+    SEVERITY_COLORS = {"CRITICAL": "#ffd6d6", "HIGH": "#ffe3c2", "MEDIUM": "#fff4c2", "LOW": "#eef2f6"}
+
     def build_changes_table(self, changes):
         esc = self._esc
         table = """
         <table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse; font-family: Arial, sans-serif; font-size: 12px;">
             <tr style="background-color: #f2f2f2;">
+                <th>Severity</th>
+                <th>Detected</th>
                 <th>Domain</th>
-                <th>Field</th>
-                <th>Old Value</th>
-                <th>New Value</th>
+                <th>Event</th>
+                <th>Old</th>
+                <th>New</th>
+                <th>PHash</th>
             </tr>
         """
         for c in changes:
+            sev = str(c.get('Severity') or '')
+            row_bg = self.SEVERITY_COLORS.get(sev, '#ffffff')
             table += f"""
-            <tr>
+            <tr style="background-color: {row_bg};">
+                <td><b>{esc(sev)}</b></td>
+                <td>{esc(c.get('Detected'))}</td>
                 <td><b>{esc(c.get('Domain'))}</b></td>
-                <td>{esc(c.get('Field'))}</td>
+                <td>{esc(c.get('Event'))}</td>
                 <td>{esc(c.get('Old'))}</td>
                 <td>{esc(c.get('New'))}</td>
+                <td>{esc(c.get('PHash'))}</td>
             </tr>
             """
         table += "</table>"
@@ -1016,6 +1205,13 @@ class AdvancedDomainHunter:
         if baseline_phash:
             logger.debug(f"Baseline visual hash for {primary_domain}: {baseline_phash}")
 
+        # The protected domain's own IPs, so look-alikes pointing at them (defensive
+        # registrations / the org's own redirects) can be suppressed.
+        primary_ips = set()
+        if self.suppress_own_infra:
+            primary_dns = await self.resolve_dns_records(primary_domain, dns_sem)
+            primary_ips = self._as_set(primary_dns.get("IP"))
+
         logger.info(f"[*] Analyzing {len(target_map)} unique structural mutations for {primary_domain}...")
 
         tasks = [
@@ -1077,27 +1273,40 @@ class AdvancedDomainHunter:
                 active_records, existing_domains, baseline_date
             )
 
-            updated = {}
+            # Per-domain suppression: ignore allow-list + the org's own defensive
+            # registrations (look-alikes resolving to the protected domain's IPs).
+            suppressed = set()
+            for r in active_records:
+                dl = str(r.get('Domain', '')).lower()
+                if self._is_ignored(dl) or (self.suppress_own_infra and self._is_own_infra(r, primary_ips)):
+                    suppressed.add(dl)
+
+            changes, updated = [], {}
             if self.change_detection:
-                changes, updated = self.detect_changes(active_records, existing_by_domain)
+                raw_changes, upd_candidates = self.detect_changes(active_records, existing_by_domain)
+                raw_changes = [c for c in raw_changes if str(c.get('Domain', '')).lower() not in suppressed]
+                # Two-scan confirmation: only alert on transitions that persisted.
+                changes, confirmed_domains = self._confirm_changes(raw_changes, state)
+                updated = {d: r for d, r in upd_candidates.items() if d in confirmed_domains}
 
             additions = new_discoveries + silent_additions
             if additions or updated:
-                # Rebuild the sheet: keep existing rows (swapping in updated ones) + append.
+                # Rebuild the sheet: keep existing rows (swapping in confirmed-changed ones) + append.
                 rows = [updated.get(str(r.get('Domain', '')).lower(), r) for r in existing_records]
                 rows.extend(additions)
                 self._write_excel_atomic(pd.DataFrame(rows), target_excel)
 
-            if new_discoveries:
+            alertable_new = [r for r in new_discoveries if str(r.get('Domain', '')).lower() not in suppressed]
+            if alertable_new:
                 logger.info(f"[+] New variations found! Added to {target_excel} and sending email alert...")
-                self.dispatch_alert_email(new_discoveries, target_excel, primary_domain, is_initial=False)
+                self.dispatch_alert_email(alertable_new, target_excel, primary_domain, is_initial=False)
             elif silent_additions:
                 logger.info(f"[*] {len(silent_additions)} domain(s) now resolving predate the baseline; recorded without alert.")
             else:
                 logger.info("[-] No new variations found.")
 
             if changes:
-                logger.info(f"[+] {len(changes)} infrastructure change(s) detected; sending change alert...")
+                logger.info(f"[+] {len(changes)} confirmed infrastructure change(s); sending change alert...")
                 self.dispatch_change_email(changes, target_excel, primary_domain)
 
         # Persist the (possibly updated) baseline date and registration cache for next run.

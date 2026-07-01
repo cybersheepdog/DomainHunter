@@ -145,25 +145,68 @@ class TestHtmlTableEscaping(HunterTestBase):
 
 
 class TestChangeDetection(HunterTestBase):
-    def test_detects_real_change_and_ignores_data_loss(self):
-        existing = [
-            {"Domain": "evil.com", "IP": "1.1.1.1", "Name Server": "ns1.x", "Registrant Name": "Joe"},
-            {"Domain": "calm.com", "IP": "9.9.9.9", "Name Server": "ns.calm", "Registrant Name": "Ann"},
-        ]
-        by_domain = {r["Domain"].lower(): r for r in existing}
-        active = [
-            {"Domain": "evil.com", "IP": "2.2.2.2", "Name Server": "ns1.x", "Registrant Name": ""},  # IP changed; registrant lost -> ignore loss
-            {"Domain": "calm.com", "IP": "9.9.9.9", "Name Server": "ns.calm", "Registrant Name": "Ann"},  # unchanged
-        ]
-        changes, updated = self.hunter.detect_changes(active, by_domain)
-        fields = {(c["Field"], c["New"]) for c in changes}
-        self.assertEqual(fields, {("IP", "2.2.2.2")})
+    def _rec(self, **over):
+        base = {"Domain": "evil.com", "IP": "", "Name Server": "", "Mail Server": "",
+                "Visual Distance": None, "Registrant Name": "", "Organization": ""}
+        base.update(over)
+        return base
+
+    def test_mail_activation_alerts(self):
+        old = self._rec(IP="1.1.1.1")
+        new = self._rec(IP="1.1.1.1", **{"Mail Server": "mx.evil.com"})
+        changes, updated = self.hunter.detect_changes([new], {"evil.com": old})
+        self.assertTrue(any("Mail server" in c["Event"] for c in changes))
+        self.assertTrue(any(c["Severity"] == "HIGH" for c in changes))
         self.assertIn("evil.com", updated)
-        self.assertNotIn("calm.com", updated)
+
+    def test_ip_churn_ignored_by_default(self):
+        old = self._rec(IP="1.1.1.1", **{"Name Server": "ns.x"})
+        new = self._rec(IP="2.2.2.2", **{"Name Server": "ns.x"})   # only the IP rotated
+        changes, updated = self.hunter.detect_changes([new], {"evil.com": old})
+        self.assertEqual(changes, [])
+        self.assertEqual(updated, {})
+
+    def test_record_reorder_is_not_a_change(self):
+        old = self._rec(IP="1.1.1.1", **{"Name Server": "a.ns, b.ns"})
+        new = self._rec(IP="1.1.1.1", **{"Name Server": "b.ns, a.ns"})   # same set, reordered
+        changes, _ = self.hunter.detect_changes([new], {"evil.com": old})
+        self.assertEqual(changes, [])
+
+    def test_visual_clone_appearance_is_critical(self):
+        old = self._rec(IP="1.1.1.1", **{"Visual Distance": None})
+        new = self._rec(IP="1.1.1.1", **{"Visual Distance": 3})
+        changes, _ = self.hunter.detect_changes([new], {"evil.com": old})
+        self.assertTrue(any(c["Severity"] == "CRITICAL" for c in changes))
+
+    def test_went_live_alerts(self):
+        old = self._rec(IP="")             # was parked / not resolving
+        new = self._rec(IP="9.9.9.9")
+        changes, _ = self.hunter.detect_changes([new], {"evil.com": old})
+        self.assertTrue(any("went live" in c["Event"] for c in changes))
+
+    def test_nameserver_redelegation_alerts(self):
+        old = self._rec(IP="1.1.1.1", **{"Name Server": "ns.parking"})
+        new = self._rec(IP="1.1.1.1", **{"Name Server": "ns.hosting"})
+        changes, _ = self.hunter.detect_changes([new], {"evil.com": old})
+        self.assertTrue(any(c["Severity"] == "MEDIUM" for c in changes))
+
+    def test_registrant_change_ignored_by_default(self):
+        old = self._rec(IP="1.1.1.1", **{"Registrant Name": "Joe"})
+        new = self._rec(IP="1.1.1.1", **{"Registrant Name": "Jane"})
+        changes, _ = self.hunter.detect_changes([new], {"evil.com": old})
+        self.assertEqual(changes, [])
+
+    def test_event_carries_phash_and_detected(self):
+        old = self._rec(IP="1.1.1.1")
+        new = self._rec(IP="1.1.1.1", **{"Mail Server": "mx.x", "PHash": "ff00",
+                                         "Detected": "2026-06-24 10:00:00"})
+        changes, _ = self.hunter.detect_changes([new], {"evil.com": old})
+        self.assertTrue(changes)
+        self.assertEqual(changes[0]["PHash"], "ff00")
+        self.assertEqual(changes[0]["Detected"], "2026-06-24 10:00:00")
 
     def test_unknown_domain_skipped(self):
-        active = [{"Domain": "brandnew.com", "IP": "1.2.3.4"}]
-        changes, updated = self.hunter.detect_changes(active, {})
+        changes, updated = self.hunter.detect_changes([self._rec(Domain="brandnew.com", IP="1.2.3.4")], {})
         self.assertEqual(changes, [])
         self.assertEqual(updated, {})
 
@@ -175,6 +218,9 @@ class TestAssembleRecord(HunterTestBase):
                "Org": "Acme", "Email1": "a@x.com", "Email2": None}
         rec = AdvancedDomainHunter._assemble_record("evil.com", "Omission", "CT-RT", dns_data, reg, "abc", 7)
         self.assertEqual(set(rec.keys()), set(self.hunter.EXCEL_COLUMNS))
+        self.assertIn("Detected", rec)
+        self.assertTrue(rec["Detected"])
+        self.assertEqual(rec["PHash"], "abc")
         self.assertEqual(rec["Domain"], "evil.com")
         self.assertEqual(rec["Discovery Source"], "CT-RT")
         self.assertEqual(rec["Date Created"], "2020-01-01")
@@ -215,6 +261,70 @@ class TestRdapParsing(HunterTestBase):
         vcard = ["vcard", [["org", {}, "text", ["Example LLC", "Dept"]]]]
         name, org, email = self.hunter._parse_vcard(vcard)
         self.assertEqual(org, "Example LLC")
+
+
+class TestFalsePositiveReduction(HunterTestBase):
+    def _rec(self, **over):
+        base = {"Domain": "evil.com", "IP": "", "Name Server": "", "Mail Server": "",
+                "Visual Distance": None, "Registrant Name": "", "Organization": ""}
+        base.update(over)
+        return base
+
+    def test_ignore_list_exact_and_suffix(self):
+        self.hunter.ignored_domains = {"evil.com", "partner.co.uk"}
+        self.assertTrue(self.hunter._is_ignored("evil.com"))
+        self.assertTrue(self.hunter._is_ignored("www.evil.com"))        # subdomain
+        self.assertTrue(self.hunter._is_ignored("mail.partner.co.uk"))  # multi-label suffix
+        self.assertFalse(self.hunter._is_ignored("notevil.com"))
+
+    def test_own_infra_suppression(self):
+        primary = {"203.0.113.5"}
+        self.assertTrue(self.hunter._is_own_infra(self._rec(IP="203.0.113.5"), primary))
+        self.assertFalse(self.hunter._is_own_infra(self._rec(IP="198.51.100.9"), primary))
+        self.assertFalse(self.hunter._is_own_infra(self._rec(IP="203.0.113.5"), set()))
+
+    def test_parking_suppresses_went_live(self):
+        old = self._rec(IP="")
+        new = self._rec(IP="1.2.3.4", **{"Name Server": "ns1.sedoparking.com"})
+        changes, _ = self.hunter.detect_changes([new], {"evil.com": old})
+        self.assertFalse(any("went live" in c["Event"] for c in changes))
+
+    def test_nonparking_went_live_still_alerts(self):
+        old = self._rec(IP="")
+        new = self._rec(IP="1.2.3.4", **{"Name Server": "ns1.realhost.com"})
+        changes, _ = self.hunter.detect_changes([new], {"evil.com": old})
+        self.assertTrue(any("went live" in c["Event"] for c in changes))
+
+    def test_ns_move_to_parking_suppressed(self):
+        old = self._rec(IP="1.1.1.1", **{"Name Server": "ns.realhost.com"})
+        new = self._rec(IP="1.1.1.1", **{"Name Server": "ns1.bodis.com"})
+        changes, _ = self.hunter.detect_changes([new], {"evil.com": old})
+        self.assertEqual(changes, [])
+
+    def test_placeholder_mx_not_activation(self):
+        old = self._rec(IP="1.1.1.1")
+        new = self._rec(IP="1.1.1.1", **{"Mail Server": "localhost"})
+        changes, _ = self.hunter.detect_changes([new], {"evil.com": old})
+        self.assertFalse(any("Mail" in c["Event"] for c in changes))
+
+    def test_confirmation_holds_then_alerts(self):
+        change = {"Domain": "evil.com", "Event": "Mail server went live", "Old": "none",
+                  "New": "mx.x", "Severity": "HIGH"}
+        state = {}
+        confirmed, _ = self.hunter._confirm_changes([dict(change)], state)
+        self.assertEqual(confirmed, [])                 # 1st sighting held
+        self.assertIn("pending_changes", state)
+        confirmed2, doms2 = self.hunter._confirm_changes([dict(change)], state)
+        self.assertEqual(len(confirmed2), 1)            # 2nd sighting confirms
+        self.assertIn("evil.com", doms2)
+
+    def test_confirmation_revert_drops(self):
+        change = {"Domain": "evil.com", "Event": "X", "Old": "a", "New": "b", "Severity": "LOW"}
+        state = {}
+        self.hunter._confirm_changes([dict(change)], state)   # pending
+        confirmed, _ = self.hunter._confirm_changes([], state)  # not seen next run -> drop
+        self.assertEqual(confirmed, [])
+        self.assertEqual(state.get("pending_changes"), {})
 
 
 if __name__ == "__main__":
