@@ -313,8 +313,11 @@ class AdvancedDomainHunter:
 
     def _write_excel_atomic(self, df, target_excel):
         """Atomic workbook write via temp file + os.replace to protect the baseline.
-        Columns are normalized to EXCEL_COLUMNS so the schema stays stable across runs."""
-        tmp = f"{target_excel}.tmp"
+        Columns are normalized to EXCEL_COLUMNS so the schema stays stable across runs.
+        The temp file KEEPS the .xlsx extension — pandas selects its Excel engine from the
+        extension, so a bare '.tmp' name makes to_excel() fail and drops the write."""
+        base, ext = os.path.splitext(target_excel)
+        tmp = f"{base}.tmp{ext or '.xlsx'}"
         try:
             df = df.reindex(columns=self.EXCEL_COLUMNS)
             df.to_excel(tmp, index=False)

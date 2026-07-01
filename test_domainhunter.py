@@ -128,6 +128,25 @@ class TestHelpers(HunterTestBase):
         self.assertIsNone(AdvancedDomainHunter._parse_retry_after(None))
         self.assertIsNone(AdvancedDomainHunter._parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT"))
 
+    def test_atomic_write_temp_keeps_xlsx_extension(self):
+        # Regression: pandas picks its Excel engine from the extension, so the temp file
+        # must stay *.xlsx (a bare .tmp makes to_excel fail and drops the write).
+        import os as _os
+        target = _os.path.join(self.tmp.name, "brand_com.xlsx")
+        seen = []
+
+        class FakeDF:
+            def reindex(self, columns=None):
+                return self
+            def to_excel(self, path, index=False):
+                seen.append(path)
+                open(path, "w").write("x")   # create temp so os.replace succeeds
+
+        self.hunter._write_excel_atomic(FakeDF(), target)
+        self.assertTrue(seen and seen[0].endswith(".xlsx"), seen)
+        self.assertTrue(_os.path.exists(target))
+        self.assertFalse(_os.path.exists(seen[0]))   # temp replaced, not left behind
+
 
 class TestHtmlTableEscaping(HunterTestBase):
     def test_injection_is_escaped(self):
