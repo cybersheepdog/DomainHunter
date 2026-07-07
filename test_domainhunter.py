@@ -345,6 +345,24 @@ class TestFalsePositiveReduction(HunterTestBase):
         self.assertEqual(confirmed, [])
         self.assertEqual(state.get("pending_changes"), {})
 
+    def test_min_severity_gate_drops_medium(self):
+        self.hunter.min_alert_severity = "HIGH"
+        self.hunter.change_alert_cooldown_days = 14
+        changes = [{"Domain": "e.com", "Event": "NS re-delegated", "Severity": "MEDIUM"},
+                   {"Domain": "e.com", "Event": "Mail went live", "Severity": "HIGH"}]
+        out = self.hunter._filter_alertable_changes(changes, {})
+        self.assertEqual([c["Severity"] for c in out], ["HIGH"])
+
+    def test_cooldown_suppresses_repeat(self):
+        self.hunter.min_alert_severity = "LOW"
+        self.hunter.change_alert_cooldown_days = 14
+        state = {}
+        change = {"Domain": "e.com", "Event": "Mail went live", "Severity": "HIGH"}
+        first = self.hunter._filter_alertable_changes([dict(change)], state)
+        self.assertEqual(len(first), 1)
+        second = self.hunter._filter_alertable_changes([dict(change)], state)   # same event, within window
+        self.assertEqual(second, [])
+
 
 if __name__ == "__main__":
     unittest.main()

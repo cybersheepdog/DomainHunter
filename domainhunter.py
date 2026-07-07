@@ -88,6 +88,8 @@ class AdvancedDomainHunter:
         "Name Server", "IP", "Mail Server", "Registered Email 1", "Registered Email 2"
     ]
 
+    SEVERITY_RANK = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+
     def __init__(self, config_path="config.ini", target_domains_path="monitored_domains.txt",
                  tlds_dict_path="abused_tlds.dict", ignored_domains_path="ignored_domains.txt",
                  parking_ns_path="parking_nameservers.txt"):
@@ -195,6 +197,10 @@ class AdvancedDomainHunter:
             'change_confirm_runs': str(CHANGE_CONFIRM_RUNS),
             'suppress_own_infra': str(SUPPRESS_OWN_INFRA),
             'parking_ip_prefixes': '',
+            # Only email change events at/above this severity (LOW/MEDIUM/HIGH/CRITICAL);
+            # and don't re-email the same (domain, event) within this many days.
+            'min_alert_severity': 'HIGH',
+            'change_alert_cooldown_days': '14',
         }
         if 'SCAN' not in self.config:
             self.config['SCAN'] = scan_defaults
@@ -256,6 +262,8 @@ class AdvancedDomainHunter:
         self.parking_ip_prefixes = [p.strip() for p in
                                     self.config.get('SCAN', 'parking_ip_prefixes', fallback='').split(',')
                                     if p.strip()]
+        self.min_alert_severity = self.config.get('SCAN', 'min_alert_severity', fallback='HIGH')
+        self.change_alert_cooldown_days = _int('change_alert_cooldown_days', 14)
 
     def _load_file_lines(self, path):
         if not os.path.exists(path):
@@ -466,6 +474,27 @@ class AdvancedDomainHunter:
                 next_pending[sig] = count
         state['pending_changes'] = next_pending
         return confirmed, {str(c.get('Domain', '')).lower() for c in confirmed}
+
+    def _filter_alertable_changes(self, changes, state):
+        """Gate which confirmed changes actually email: drop anything below
+        min_alert_severity, and suppress a repeat of the same (domain, event) within
+        change_alert_cooldown_days. Confirmed changes still refresh the workbook — this
+        only controls the email, to cut volume and raise fidelity."""
+        min_rank = self.SEVERITY_RANK.get(str(self.min_alert_severity).upper(), 3)
+        ledger = state.get('alerted_changes', {}) or {}
+        now = datetime.now()
+        out = []
+        for c in changes:
+            if self.SEVERITY_RANK.get(str(c.get('Severity', '')).upper(), 0) < min_rank:
+                continue
+            key = f"{str(c.get('Domain', '')).lower()}|{c.get('Event')}"
+            last = self._parse_created(ledger.get(key))
+            if last is not None and (now - last).days < self.change_alert_cooldown_days:
+                continue
+            ledger[key] = now.strftime("%Y-%m-%d")
+            out.append(c)
+        state['alerted_changes'] = ledger
+        return out
 
     def _classify_changes(self, old, new):
         """Return only HIGH-SIGNAL infrastructure transitions between the stored row and a
@@ -1308,9 +1337,12 @@ class AdvancedDomainHunter:
             else:
                 logger.info("[-] No new variations found.")
 
-            if changes:
-                logger.info(f"[+] {len(changes)} confirmed infrastructure change(s); sending change alert...")
-                self.dispatch_change_email(changes, target_excel, primary_domain)
+            alertable_changes = self._filter_alertable_changes(changes, state) if changes else []
+            if alertable_changes:
+                logger.info(f"[+] {len(alertable_changes)} change(s) to alert (of {len(changes)} confirmed); sending change alert...")
+                self.dispatch_change_email(alertable_changes, target_excel, primary_domain)
+            elif changes:
+                logger.info(f"[*] {len(changes)} confirmed change(s) suppressed by severity/cooldown gate.")
 
         # Persist the (possibly updated) baseline date and registration cache for next run.
         state['whois_cache'] = whois_cache

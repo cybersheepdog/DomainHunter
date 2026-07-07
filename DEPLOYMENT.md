@@ -60,6 +60,15 @@ if you want everything, turn `alert_on_ip` / `alert_on_registrant` on.
 | `change_confirm_runs` | 2 | A change must persist across this many scans before it emails (flap suppression). Set to 1 to alert immediately. |
 | `suppress_own_infra` | true | Don't alert on look-alikes that resolve to the protected domain's own IPs (defensive registrations). |
 | `parking_ip_prefixes` | (empty) | Comma-separated IP prefixes to treat as parking, e.g. `91.195.240.,199.59.243.`. |
+| `min_alert_severity` | HIGH | Only email change events at/above this level: `LOW` < `MEDIUM` < `HIGH` < `CRITICAL`. At the default HIGH, MEDIUM nameserver re-delegations are logged but not emailed. |
+| `change_alert_cooldown_days` | 14 | Don't re-email the same (domain, event) within this many days — kills oscillation/flap repeats. Set to 0 to disable. |
+
+**Event severities:** visual clone = CRITICAL; mail went live / changed = HIGH; domain
+went live = HIGH; nameserver re-delegation = MEDIUM; IP / registrant (opt-in) = LOW. So
+the default `min_alert_severity = HIGH` emails only the genuinely dangerous transitions.
+Confirmed changes still land in the workbook regardless — the gate only controls email.
+If a domain still emails too often, raise `change_confirm_runs` to 3 or extend
+`change_alert_cooldown_days`.
 
 Additional stackable defenses:
 
