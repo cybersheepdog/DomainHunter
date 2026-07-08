@@ -326,6 +326,25 @@ class TestFalsePositiveReduction(HunterTestBase):
         changes, _ = self.hunter.detect_changes([new], {"evil.com": old})
         self.assertFalse(any("Mail" in c["Event"] for c in changes))
 
+    def test_mail_add_host_same_provider_no_alert(self):
+        # mx1 + mx2 at the SAME provider must not fire "mail changed".
+        old = self._rec(IP="1.1.1.1", **{"Mail Server": "mx1.hostinger.com"})
+        new = self._rec(IP="1.1.1.1", **{"Mail Server": "mx1.hostinger.com, mx2.hostinger.com"})
+        changes, _ = self.hunter.detect_changes([new], {"evil.com": old})
+        self.assertEqual(changes, [])
+
+    def test_mail_new_provider_alerts(self):
+        old = self._rec(IP="1.1.1.1", **{"Mail Server": "mx1.hostinger.com"})
+        new = self._rec(IP="1.1.1.1", **{"Mail Server": "aspmx.l.google.com"})
+        changes, _ = self.hunter.detect_changes([new], {"evil.com": old})
+        self.assertTrue(any(c["Severity"] == "HIGH" for c in changes))
+
+    def test_mx_providers_helper(self):
+        self.assertEqual(self.hunter._mx_providers({"mx1.hostinger.com", "mx2.hostinger.com"}),
+                         {"hostinger.com"})
+        self.assertEqual(self.hunter._mx_providers({"aspmx.l.google.com"}), {"google.com"})
+        self.assertEqual(self.hunter._mx_providers({"mx.mail.co.uk"}), {"mail.co.uk"})
+
     def test_confirmation_holds_then_alerts(self):
         change = {"Domain": "evil.com", "Event": "Mail server went live", "Old": "none",
                   "New": "mx.x", "Severity": "HIGH"}

@@ -90,6 +90,13 @@ class AdvancedDomainHunter:
 
     SEVERITY_RANK = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
 
+    # Common two-level public suffixes, so a mail host like mx.example.co.uk maps to the
+    # provider example.co.uk rather than co.uk.
+    TWO_LEVEL_TLDS = {
+        "co.uk", "org.uk", "me.uk", "com.au", "net.au", "org.au", "co.nz", "co.jp",
+        "com.br", "co.in", "co.za", "com.mx", "com.tr", "com.sg", "com.hk",
+    }
+
     def __init__(self, config_path="config.ini", target_domains_path="monitored_domains.txt",
                  tlds_dict_path="abused_tlds.dict", ignored_domains_path="ignored_domains.txt",
                  parking_ns_path="parking_nameservers.txt"):
@@ -446,6 +453,21 @@ class AdvancedDomainHunter:
         bad = {"", "localhost", "0.0.0.0", "null", "invalid"}
         return {m for m in mx_set if m.strip().lower() not in bad}
 
+    @staticmethod
+    def _mx_providers(mx_set):
+        """Map MX hosts to their provider (registrable) domain, so mx1/mx2 at the same
+        provider collapse together (e.g. mx1.hostinger.com, mx2.hostinger.com -> hostinger.com)."""
+        providers = set()
+        for host in mx_set:
+            labels = [l for l in str(host).strip('.').lower().split('.') if l]
+            if len(labels) >= 3 and '.'.join(labels[-2:]) in AdvancedDomainHunter.TWO_LEVEL_TLDS:
+                providers.add('.'.join(labels[-3:]))
+            elif len(labels) >= 2:
+                providers.add('.'.join(labels[-2:]))
+            elif labels:
+                providers.add(labels[-1])
+        return providers
+
     def _is_own_infra(self, record, primary_ips):
         """True if the look-alike resolves to one of the protected domain's own IPs
         (a defensive registration / the org's own redirect), so it isn't a threat."""
@@ -521,11 +543,15 @@ class AdvancedDomainHunter:
         # Mail infrastructure appearing/changing — credential harvesting / BEC prep.
         # Placeholder/null MX is filtered so vanity records don't look like real mail.
         old_mx, new_mx = self._functional_mx(old_mx), self._functional_mx(new_mx)
+        old_providers, new_providers = self._mx_providers(old_mx), self._mx_providers(new_mx)
         if self.alert_on_mail and new_mx and not old_mx:
             ev("Mail server went live (possible credential / BEC infra)",
                "none", ", ".join(sorted(new_mx)), "HIGH")
-        elif self.alert_on_mail and new_mx and old_mx and new_mx != old_mx:
-            ev("Mail server changed", ", ".join(sorted(old_mx)), ", ".join(sorted(new_mx)), "HIGH")
+        elif self.alert_on_mail and old_mx and (new_providers - old_providers):
+            # Only a genuinely NEW mail provider counts. Adding/removing a host within the
+            # same provider (mx1 + mx2 at the same domain) is benign and ignored.
+            ev("Mail provider changed (new mail provider appeared)",
+               ", ".join(sorted(old_mx)), ", ".join(sorted(new_mx)), "HIGH")
 
         # A parked / non-resolving look-alike started resolving — but only flag it if it
         # landed on real hosting, not registrar/domain parking (the common benign case).
