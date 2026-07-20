@@ -224,6 +224,19 @@ class TestChangeDetection(HunterTestBase):
         self.assertEqual(changes[0]["PHash"], "ff00")
         self.assertEqual(changes[0]["Detected"], "2026-06-24 10:00:00")
 
+    def test_event_includes_why_and_renders(self):
+        old = self._rec(IP="1.1.1.1")
+        new = self._rec(IP="1.1.1.1", **{"Mail Server": "mx1.evil.com"})
+        changes, _ = self.hunter.detect_changes([new], {"evil.com": old})
+        self.assertTrue(changes and changes[0].get("Why"))       # rationale present
+        html = self.hunter.build_changes_table(changes)
+        self.assertIn("What changed", html)                      # old -> new line
+        self.assertIn("Why HIGH", html)                          # severity rationale label
+        self.assertIn("evil.com", html)
+        # rationale escaping still holds
+        changes[0]["Why"] = "<script>x</script>"
+        self.assertNotIn("<script>x</script>", self.hunter.build_changes_table(changes))
+
     def test_unknown_domain_skipped(self):
         changes, updated = self.hunter.detect_changes([self._rec(Domain="brandnew.com", IP="1.2.3.4")], {})
         self.assertEqual(changes, [])

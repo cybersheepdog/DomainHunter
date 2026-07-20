@@ -527,9 +527,9 @@ class AdvancedDomainHunter:
         events = []
         detected = new.get("Detected") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        def ev(desc, o, n, sev):
+        def ev(desc, o, n, sev, why):
             events.append({"Domain": new.get("Domain"), "Event": desc, "Old": o, "New": n,
-                           "Severity": sev, "Detected": detected, "PHash": new.get("PHash")})
+                           "Severity": sev, "Why": why, "Detected": detected, "PHash": new.get("PHash")})
 
         old_ip, new_ip = self._as_set(old.get("IP")), self._as_set(new.get("IP"))
         old_mx, new_mx = self._as_set(old.get("Mail Server")), self._as_set(new.get("Mail Server"))
@@ -538,7 +538,11 @@ class AdvancedDomainHunter:
         # Strongest signal: the page now visually matches the protected brand.
         if self.alert_on_visual_clone and self._is_clone(new.get("Visual Distance")) and not self._is_clone(old.get("Visual Distance")):
             ev("Now serves a look-alike page (visual clone)", "no visual match",
-               str(new.get("Visual Distance")), "CRITICAL")
+               str(new.get("Visual Distance")), "CRITICAL",
+               "The rendered page now closely matches the protected site's appearance "
+               f"(perceptual-hash distance {new.get('Visual Distance')} ≤ threshold "
+               f"{self.visual_match_threshold}). Pixel-level impersonation is the highest-"
+               "confidence phishing signal, so this is CRITICAL.")
 
         # Mail infrastructure appearing/changing — credential harvesting / BEC prep.
         # Placeholder/null MX is filtered so vanity records don't look like real mail.
@@ -546,35 +550,51 @@ class AdvancedDomainHunter:
         old_providers, new_providers = self._mx_providers(old_mx), self._mx_providers(new_mx)
         if self.alert_on_mail and new_mx and not old_mx:
             ev("Mail server went live (possible credential / BEC infra)",
-               "none", ", ".join(sorted(new_mx)), "HIGH")
+               "none", ", ".join(sorted(new_mx)), "HIGH",
+               "This look-alike had no mail server and now has one. Attackers stand up mail "
+               "on look-alike domains to send phishing or receive harvested credentials / "
+               "run BEC. Rated HIGH.")
         elif self.alert_on_mail and old_mx and (new_providers - old_providers):
             # Only a genuinely NEW mail provider counts. Adding/removing a host within the
             # same provider (mx1 + mx2 at the same domain) is benign and ignored.
             ev("Mail provider changed (new mail provider appeared)",
-               ", ".join(sorted(old_mx)), ", ".join(sorted(new_mx)), "HIGH")
+               ", ".join(sorted(old_mx)), ", ".join(sorted(new_mx)), "HIGH",
+               "Mail is now handled by a provider that wasn't there before "
+               f"(new: {', '.join(sorted(new_providers - old_providers))}). A shift in mail "
+               "infrastructure can mean attacker-controlled mail standing up. Rated HIGH.")
 
         # A parked / non-resolving look-alike started resolving — but only flag it if it
         # landed on real hosting, not registrar/domain parking (the common benign case).
         if self.alert_on_activation and new_ip and not old_ip and not self._looks_parked(new):
             ev("Domain started resolving (went live)", "not resolving",
-               ", ".join(sorted(new_ip)), "HIGH")
+               ", ".join(sorted(new_ip)), "HIGH",
+               "A previously parked / non-resolving look-alike is now live on real hosting "
+               "(not registrar parking). Activation onto real infrastructure is a common "
+               "pre-attack step. Rated HIGH.")
 
         # Re-delegation to real hosting (e.g. registrar parking -> live host). Moves TO
         # parking are ignored as benign.
         if self.alert_on_nameserver and old_ns and new_ns and old_ns != new_ns and not self._is_parking_ns(new_ns):
             ev("Name servers changed (re-delegated)",
-               ", ".join(sorted(old_ns)), ", ".join(sorted(new_ns)), "MEDIUM")
+               ", ".join(sorted(old_ns)), ", ".join(sorted(new_ns)), "MEDIUM",
+               "The domain was re-delegated to different (non-parking) nameservers, which "
+               "usually means it moved toward live hosting. Noteworthy but weaker on its own, "
+               "so MEDIUM.")
 
         # Off by default — IP rotation within a host/CDN is the dominant source of noise.
         if self.alert_on_ip and old_ip and new_ip and old_ip != new_ip:
-            ev("IP address changed", ", ".join(sorted(old_ip)), ", ".join(sorted(new_ip)), "LOW")
+            ev("IP address changed", ", ".join(sorted(old_ip)), ", ".join(sorted(new_ip)), "LOW",
+               "The A record changed. This is frequently benign (CDN / host IP rotation) and "
+               "is only shown because alert_on_ip is enabled. Rated LOW.")
 
         # Off by default — WHOIS-privacy toggling makes these unreliable.
         if self.alert_on_registrant:
             for field, label in (("Registrant Name", "Registrant name"), ("Organization", "Organization")):
                 o, n = self._norm(old.get(field)), self._norm(new.get(field))
                 if n and o and n != o:
-                    ev(f"{label} changed", o, n, "LOW")
+                    ev(f"{label} changed", o, n, "LOW",
+                       "Registration details changed. Often noise (WHOIS-privacy toggling); "
+                       "shown only because alert_on_registrant is enabled. Rated LOW.")
 
         return events
 
@@ -1085,37 +1105,41 @@ class AdvancedDomainHunter:
         return table
 
     SEVERITY_COLORS = {"CRITICAL": "#ffd6d6", "HIGH": "#ffe3c2", "MEDIUM": "#fff4c2", "LOW": "#eef2f6"}
+    SEVERITY_ACCENTS = {"CRITICAL": "#c0392b", "HIGH": "#d35400", "MEDIUM": "#b7950b", "LOW": "#5d6d7e"}
 
     def build_changes_table(self, changes):
+        """Render each change as a self-explanatory card: what changed (old -> new), when it
+        was detected, and *why* it's rated at its severity."""
         esc = self._esc
-        table = """
-        <table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse; font-family: Arial, sans-serif; font-size: 12px;">
-            <tr style="background-color: #f2f2f2;">
-                <th>Severity</th>
-                <th>Detected</th>
-                <th>Domain</th>
-                <th>Event</th>
-                <th>Old</th>
-                <th>New</th>
-                <th>PHash</th>
-            </tr>
-        """
+        blocks = []
         for c in changes:
             sev = str(c.get('Severity') or '')
-            row_bg = self.SEVERITY_COLORS.get(sev, '#ffffff')
-            table += f"""
-            <tr style="background-color: {row_bg};">
-                <td><b>{esc(sev)}</b></td>
-                <td>{esc(c.get('Detected'))}</td>
-                <td><b>{esc(c.get('Domain'))}</b></td>
-                <td>{esc(c.get('Event'))}</td>
-                <td>{esc(c.get('Old'))}</td>
-                <td>{esc(c.get('New'))}</td>
-                <td>{esc(c.get('PHash'))}</td>
-            </tr>
-            """
-        table += "</table>"
-        return table
+            accent = self.SEVERITY_ACCENTS.get(sev, "#5d6d7e")
+            bg = self.SEVERITY_COLORS.get(sev, "#f7f7f7")
+
+            def row(label, value, bold=False):
+                v = f"<b>{esc(value)}</b>" if bold else esc(value)
+                return (f'<tr><td style="color:#666;padding:2px 10px 2px 0;white-space:nowrap;'
+                        f'vertical-align:top;">{esc(label)}</td><td style="padding:2px 0;">{v}</td></tr>')
+
+            rows = row("What changed", f"{c.get('Old')}  →  {c.get('New')}", True)
+            rows += row("Detected", c.get('Detected'))
+            rows += row(f"Why {sev}", c.get('Why'))
+            if self._norm(c.get('PHash')):
+                rows += row("PHash", c.get('PHash'))
+
+            blocks.append(f"""
+            <div style="border-left:6px solid {accent}; background:{bg}; margin:12px 0;
+                        padding:10px 14px; font-family:Arial,sans-serif;">
+                <div style="font-size:12px;letter-spacing:1px;">
+                    <b style="color:{accent};">{esc(sev)}</b>
+                    &nbsp;&middot;&nbsp; <b>{esc(c.get('Domain'))}</b>
+                </div>
+                <div style="font-size:15px;margin:4px 0 6px;">{esc(c.get('Event'))}</div>
+                <table style="border-collapse:collapse;font-size:12.5px;">{rows}</table>
+            </div>
+            """)
+        return "".join(blocks)
 
     def _send_email(self, subject, html_body, target_excel):
         """Shared SMTP send used by both new-discovery and change alerts."""
@@ -1208,15 +1232,24 @@ class AdvancedDomainHunter:
         safe_domain = self._esc(primary_domain)
         subject = f"DomainHunter Alert: Infrastructure Changes for {primary_domain}"
         intro_text = (
-            f"Changes detected on already-tracked look-alike domains for <b>{safe_domain}</b>. "
-            "A parked squat going live or changing hosting/registrant can signal an imminent campaign."
+            f"High-signal changes were detected on already-tracked look-alike domains for "
+            f"<b>{safe_domain}</b>. Each card below shows exactly what changed and why it is "
+            "rated at its severity."
+        )
+        legend = (
+            '<p style="font-family:Arial,sans-serif;font-size:11.5px;color:#555;margin:4px 0 0;">'
+            'Severity: <b style="color:#c0392b;">CRITICAL</b> visual clone &middot; '
+            '<b style="color:#d35400;">HIGH</b> mail/hosting went live &middot; '
+            '<b style="color:#b7950b;">MEDIUM</b> nameserver re-delegation &middot; '
+            '<b style="color:#5d6d7e;">LOW</b> IP/registrant.</p>'
         )
         html_body = f"""
         <html>
             <body>
                 <p style="font-family: Arial, sans-serif; font-size: 14px;">{intro_text}</p>
+                {legend}
                 <hr/>
-                <h3>Detected Changes ({len(changes)} field change(s)):</h3>
+                <h3 style="font-family:Arial,sans-serif;">Detected Changes ({len(changes)}):</h3>
                 {self.build_changes_table(changes)}
                 <br/>
                 <p style="font-family: Arial, sans-serif; font-size: 11px; color: #555;">
